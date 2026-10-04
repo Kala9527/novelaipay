@@ -53,6 +53,8 @@ class UpstreamAccount(Base):
     name: Mapped[str] = mapped_column(String(80), unique=True)
     base_url: Mapped[str] = mapped_column(String(500))
     encrypted_key: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(String(20), default='openai')
+    opus_free: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -74,6 +76,7 @@ class PriceVersion(Base):
     model_mapping_id: Mapped[int] = mapped_column(ForeignKey('model_mappings.id'), index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
     currency: Mapped[str] = mapped_column(String(3), default='CNY')
+    billing_mode: Mapped[str] = mapped_column(String(20), default='fixed')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -94,6 +97,8 @@ class GenerationJob(Base):
     mapping_revision: Mapped[int] = mapped_column(Integer)
     prompt: Mapped[str] = mapped_column(Text)
     size: Mapped[str] = mapped_column(String(40))
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    anlas_cost: Mapped[int | None] = mapped_column(Integer)
     request_hash: Mapped[str] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(150))
     status: Mapped[str] = mapped_column(String(20), default=JobStatus.QUEUED)

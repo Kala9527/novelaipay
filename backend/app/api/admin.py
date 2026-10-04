@@ -21,6 +21,8 @@ class UpstreamCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(max_length=500)
     api_key: str = Field(min_length=1)
+    provider: str = Field(default='openai', pattern='^(openai|novelai)$')
+    opus_free: bool = False
 
 
 class MappingUpsert(BaseModel):
@@ -58,6 +60,7 @@ class KeyIssue(BaseModel):
 class Resolution(BaseModel):
     succeeded: bool
     image_url: str | None = None
+    anlas_charged: int | None = Field(default=None, ge=0)
     note: str | None = Field(default=None, max_length=500)
 
 
@@ -181,7 +184,8 @@ def credit(payload: CreditRequest, _: User = Depends(admin_user), db: Session = 
 
 @router.get('/upstreams')
 def upstreams(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
-    return [{'id': row.id, 'name': row.name, 'base_url': row.base_url, 'enabled': row.enabled}
+    return [{'id': row.id, 'name': row.name, 'base_url': row.base_url,
+             'provider': row.provider, 'opus_free': row.opus_free, 'enabled': row.enabled}
             for row in db.scalars(select(UpstreamAccount).order_by(UpstreamAccount.id))]
 
 
@@ -195,11 +199,13 @@ def create_upstream(payload: UpstreamCreate, _: User = Depends(admin_user), db: 
     if db.scalar(select(UpstreamAccount).where(UpstreamAccount.name == payload.name)):
         raise HTTPException(409, 'Upstream name exists')
     account = UpstreamAccount(name=payload.name, base_url=payload.base_url.rstrip('/'),
-                              encrypted_key=encrypt_upstream_key(payload.api_key))
+                              encrypted_key=encrypt_upstream_key(payload.api_key),
+                              provider=payload.provider, opus_free=payload.opus_free)
     db.add(account)
     db.commit()
     db.refresh(account)
-    return {'id': account.id, 'name': account.name, 'base_url': account.base_url}
+    return {'id': account.id, 'name': account.name, 'base_url': account.base_url,
+            'provider': account.provider, 'opus_free': account.opus_free}
 
 
 @router.get('/mappings')
@@ -213,7 +219,8 @@ def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> li
                        'upstream_account_id': row.upstream_account_id,
                        'upstream_model': row.upstream_model, 'enabled': row.enabled,
                        'max_concurrency': row.max_concurrency, 'revision': row.revision,
-                       'price': str(price.amount) if price else None})
+                       'price': str(price.amount) if price else None,
+                       'billing_mode': price.billing_mode if price else None})
     return result
 
 
@@ -238,8 +245,10 @@ def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Se
     price = db.scalar(select(PriceVersion).where(PriceVersion.model_mapping_id == row.id).order_by(
         PriceVersion.id.desc(),
     ))
-    if price is None or price.amount != payload.price:
-        db.add(PriceVersion(model_mapping_id=row.id, amount=payload.price))
+    billing_mode = 'anlas' if account.provider == 'novelai' else 'fixed'
+    if price is None or price.amount != payload.price or price.billing_mode != billing_mode:
+        db.add(PriceVersion(model_mapping_id=row.id, amount=payload.price,
+                            billing_mode=billing_mode))
     db.commit()
     return {'id': row.id, 'revision': row.revision}
 
@@ -256,6 +265,10 @@ def resolve(job_id: str, payload: Resolution, _: User = Depends(admin_user),
             db: Session = Depends(get_db)) -> dict:
     if payload.succeeded and not payload.image_url:
         raise HTTPException(422, 'Image URL required for successful job')
-    result = {'data': [{'url': payload.image_url}]} if payload.succeeded else None
+    job = db.get(GenerationJob, job_id)
+    if payload.succeeded and job and job.anlas_cost is not None and payload.anlas_charged is None:
+        raise HTTPException(422, 'Actual Anlas charge required')
+    result = {'data': [{'url': payload.image_url}],
+              'anlas_charged': payload.anlas_charged} if payload.succeeded else None
     resolve_uncertain(db, job_id, result, payload.note)
     return {'ok': True}

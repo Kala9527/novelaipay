@@ -12,6 +12,7 @@ from .models import (
     ApiKey, GenerationJob, JobStatus, ModelMapping, PaymentOrder, PriceVersion,
     UpstreamAccount, UsageRecord, User, WalletLedger, utcnow,
 )
+from .novelai import ImageParameters, estimate_anlas, validate_size
 
 
 def require_user_lock(db: Session, user_id: int, allow_inactive: bool = False) -> User:
@@ -21,9 +22,12 @@ def require_user_lock(db: Session, user_id: int, allow_inactive: bool = False) -
     return user
 
 
-def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size: str, idem: str) -> GenerationJob:
+def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size: str,
+               idem: str, parameters: ImageParameters | None = None) -> GenerationJob:
+    parameters = parameters or ImageParameters()
     request_hash = hashlib.sha256(json.dumps(
-        {'model': model_name, 'prompt': prompt, 'size': size}, sort_keys=True,
+        {'model': model_name, 'prompt': prompt, 'size': size,
+         'parameters': parameters.model_dump()}, sort_keys=True,
     ).encode()).hexdigest()
     db.commit()
     with db.begin():
@@ -48,6 +52,17 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
         ).order_by(PriceVersion.id.desc()))
         if price is None:
             raise HTTPException(503, 'Model has no price')
+        anlas_cost = None
+        amount = price.amount
+        if account.provider == 'novelai':
+            try:
+                validate_size(size)
+                anlas_cost = estimate_anlas(mapping.upstream_model, size, parameters,
+                                            account.opus_free)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            # Keep room for changes in NovelAI's unpublished price formula.
+            amount = price.amount * anlas_cost * 2
         active_total = db.scalar(select(func.count()).select_from(GenerationJob).where(
             GenerationJob.user_id == user.id,
             GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
@@ -61,16 +76,17 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
         ))
         if active_model >= mapping.max_concurrency:
             raise HTTPException(429, 'Model concurrent job limit reached')
-        if user.balance - user.reserved < price.amount:
+        if user.balance - user.reserved < amount:
             raise HTTPException(402, 'Insufficient balance')
-        user.reserved += price.amount
+        user.reserved += amount
         job = GenerationJob(
             id=str(uuid.uuid4()), user_id=user.id, api_key_id=api_key.id,
             model_mapping_id=mapping.id, price_version_id=price.id,
             upstream_account_id=account.id, public_model=mapping.public_name,
             upstream_model=mapping.upstream_model, mapping_revision=mapping.revision,
-            prompt=prompt, size=size, request_hash=request_hash,
-            idempotency_key=idem, status=JobStatus.QUEUED, reserved_amount=price.amount,
+            prompt=prompt, size=size, parameters=parameters.model_dump(), anlas_cost=anlas_cost,
+            request_hash=request_hash, idempotency_key=idem, status=JobStatus.QUEUED,
+            reserved_amount=amount,
         )
         db.add(job)
     return job
@@ -112,13 +128,24 @@ def claim_job(db: Session, lease_seconds: int) -> GenerationJob | None:
     with db.begin():
         query = select(GenerationJob).where(GenerationJob.status == JobStatus.QUEUED).order_by(
             GenerationJob.created_at, GenerationJob.id,
-        ).limit(1)
+        ).limit(20)
         if db.bind.dialect.name == 'postgresql':
             query = query.with_for_update(skip_locked=True)
-        job = db.scalar(query)
-        if job:
+        job = None
+        for candidate in db.scalars(query):
+            account = db.scalar(select(UpstreamAccount).where(
+                UpstreamAccount.id == candidate.upstream_account_id).with_for_update())
+            if account and account.provider == 'novelai':
+                busy = db.scalar(select(func.count()).select_from(GenerationJob).where(
+                    GenerationJob.upstream_account_id == account.id,
+                    GenerationJob.status.in_([JobStatus.RUNNING, JobStatus.UNCERTAIN]),
+                ))
+                if busy:
+                    continue
+            job = candidate
             job.status = JobStatus.RUNNING
             job.lease_until = utcnow() + timedelta(seconds=lease_seconds)
+            break
     return job
 
 
@@ -149,6 +176,19 @@ def finish_job(db: Session, job_id: str, result: dict | None, error: str | None,
             job.status = JobStatus.UNCERTAIN
             job.error = error
             return
+        charged_amount = job.reserved_amount
+        if result is not None and job.anlas_cost is not None:
+            actual_anlas = result.get('anlas_charged')
+            if not isinstance(actual_anlas, int) or actual_anlas < 0:
+                job.status = JobStatus.UNCERTAIN
+                job.error = 'NovelAI charge missing; reconcile manually'
+                return
+            price = db.get(PriceVersion, job.price_version_id)
+            charged_amount = price.amount * actual_anlas
+            if charged_amount > job.reserved_amount:
+                job.status = JobStatus.UNCERTAIN
+                job.error = 'NovelAI charge exceeds reservation; reconcile manually'
+                return
         user.reserved -= job.reserved_amount
         job.finished_at = utcnow()
         if result is None:
@@ -157,14 +197,16 @@ def finish_job(db: Session, job_id: str, result: dict | None, error: str | None,
             return
         job.status = JobStatus.SUCCEEDED
         job.result = result
-        user.balance -= job.reserved_amount
+        job.reserved_amount = charged_amount
+        job.anlas_cost = result['anlas_charged'] if result is not None and job.anlas_cost is not None else job.anlas_cost
+        user.balance -= charged_amount
         db.add(WalletLedger(
-            user_id=user.id, amount=-job.reserved_amount,
+            user_id=user.id, amount=-charged_amount,
             kind='usage', reference=f'job:{job.id}',
         ))
         db.add(UsageRecord(
             user_id=user.id, job_id=job.id,
-            price_version_id=job.price_version_id, amount=job.reserved_amount,
+            price_version_id=job.price_version_id, amount=charged_amount,
         ))
 
 
@@ -175,6 +217,15 @@ def resolve_uncertain(db: Session, job_id: str, result: dict | None, error: str 
         if job is None or job.status != JobStatus.UNCERTAIN:
             raise HTTPException(409, 'Job is not awaiting reconciliation')
         user = require_user_lock(db, job.user_id, allow_inactive=True)
+        charged_amount = job.reserved_amount
+        if result is not None and job.anlas_cost is not None:
+            actual_anlas = result.get('anlas_charged')
+            if not isinstance(actual_anlas, int) or actual_anlas < 0:
+                raise HTTPException(422, 'Actual Anlas charge required')
+            price = db.get(PriceVersion, job.price_version_id)
+            charged_amount = price.amount * actual_anlas
+            if user.balance - user.reserved + job.reserved_amount < charged_amount:
+                raise HTTPException(402, 'Credit wallet before reconciling charge')
         user.reserved -= job.reserved_amount
         job.finished_at = utcnow()
         job.error = error
@@ -183,8 +234,11 @@ def resolve_uncertain(db: Session, job_id: str, result: dict | None, error: str 
         else:
             job.status = JobStatus.SUCCEEDED
             job.result = result
-            user.balance -= job.reserved_amount
-            db.add(WalletLedger(user_id=user.id, amount=-job.reserved_amount,
+            job.reserved_amount = charged_amount
+            if job.anlas_cost is not None:
+                job.anlas_cost = result['anlas_charged']
+            user.balance -= charged_amount
+            db.add(WalletLedger(user_id=user.id, amount=-charged_amount,
                                 kind='usage', reference=f'job:{job.id}'))
             db.add(UsageRecord(user_id=user.id, job_id=job.id,
-                               price_version_id=job.price_version_id, amount=job.reserved_amount))
+                               price_version_id=job.price_version_id, amount=charged_amount))

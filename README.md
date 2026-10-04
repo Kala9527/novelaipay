@@ -1,6 +1,6 @@
 # Novelaipay
 
-FastAPI + React/Vite/TypeScript image API console. The API and worker share one Python 3.13 image; PostgreSQL stores jobs, accounts, balances and immutable ledger entries. The built frontend is served by FastAPI on port **8009**.
+FastAPI + React/Vite/TypeScript image API console with NovelAI and OpenAI-compatible upstreams. The API and worker share one Python 3.13 image; PostgreSQL stores jobs, accounts, balances and immutable ledger entries. SQLite is supported for local debugging. The built frontend is served by FastAPI on port **8009**.
 
 ## Local development (Windows)
 
@@ -30,3 +30,5 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 `config.yaml` is ignored by Git. Its `admin` section is the source of truth for the single administrator's email, display name, password and concurrent job limit. Re-run `python -m app.bootstrap` after changing it locally; Compose runs bootstrap when the API starts. Users can self-register when `registration.enabled` is true, or an administrator can add them. Administrator deletion is blocked; ordinary user deletion archives the account and preserves its balance, ledger and job history. The administrator can restore an archived account, then issue new API keys.
 
 See [开发部署文档.md](开发部署文档.md) for the Ubuntu VM, production image transfer, API examples and troubleshooting.
+
+For NovelAI, add an upstream account with provider `novelai`, base URL `https://image.novelai.net`, and an Access Token. Map a public model to `nai-diffusion-4-5-full` (or another supported model) and configure CNY per Anlas. A downstream key submits jobs through `/v1/images/generations`; the worker settles against the upstream account's actual Anlas balance change. Use a dedicated upstream account and see the deployment document for pricing limits and image retrieval.

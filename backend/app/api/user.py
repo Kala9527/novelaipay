@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import ApiKey, GenerationJob, ModelMapping, PriceVersion, UsageRecord, User, WalletLedger, utcnow
 from ..security import new_api_key
+from ..upstream import IMAGE_DIR
 from .deps import csrf_user, current_user
 
 
@@ -23,7 +25,8 @@ def key_view(key: ApiKey) -> dict:
 
 def job_view(job: GenerationJob) -> dict:
     return {'id': job.id, 'model': job.public_model, 'prompt': job.prompt,
-            'size': job.size, 'status': job.status, 'amount': str(job.reserved_amount),
+            'size': job.size, 'parameters': job.parameters or {}, 'anlas_cost': job.anlas_cost,
+            'status': job.status, 'amount': str(job.reserved_amount),
             'result': job.result, 'error': job.error, 'created_at': job.created_at,
             'finished_at': job.finished_at}
 
@@ -67,7 +70,8 @@ def list_models(_: User = Depends(current_user), db: Session = Depends(get_db)) 
         ).order_by(PriceVersion.id.desc()))
         if price:
             result.append({'name': mapping.public_name, 'price': str(price.amount),
-                           'currency': price.currency, 'max_concurrency': mapping.max_concurrency})
+                           'currency': price.currency, 'billing_mode': price.billing_mode,
+                           'max_concurrency': mapping.max_concurrency})
     return result
 
 
@@ -77,6 +81,15 @@ def list_jobs(user: User = Depends(current_user), db: Session = Depends(get_db))
         GenerationJob.created_at.desc(), GenerationJob.id.desc(),
     ).limit(100)).all()
     return [job_view(job) for job in jobs]
+
+
+@router.get('/jobs/{job_id}/image')
+def job_image(job_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    job = db.get(GenerationJob, job_id)
+    image = IMAGE_DIR / f'{job_id}.png'
+    if job is None or job.user_id != user.id or job.status != 'succeeded' or not image.is_file():
+        raise HTTPException(404, 'Image not found')
+    return FileResponse(image, media_type='image/png', filename=f'{job_id}.png')
 
 
 @router.get('/billing')

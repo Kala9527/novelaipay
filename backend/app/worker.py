@@ -7,7 +7,7 @@ from .config import get_settings
 from .db import SessionLocal
 from .models import UpstreamAccount
 from .services import claim_job, finish_job, recover_expired
-from .upstream import OpenAIImageAdapter, UpstreamUncertain
+from .upstream import NovelAIImageAdapter, OpenAIImageAdapter, UpstreamUncertain
 
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +29,8 @@ def run_once() -> bool:
             db.rollback()
             finish_job(db, job_id, None, 'Upstream account disabled')
             return True
-        adapter = OpenAIImageAdapter(account, settings.upstream_timeout_seconds)
+        adapter_class = NovelAIImageAdapter if account.provider == 'novelai' else OpenAIImageAdapter
+        adapter = adapter_class(account, settings.upstream_timeout_seconds)
         try:
             result = adapter.generate(job)
             error = None

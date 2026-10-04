@@ -1,12 +1,16 @@
 import hashlib
 import hmac
 import json
+import io
 import os
+import tempfile
 import time
 import unittest
+import zipfile
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
+import httpx
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
@@ -186,6 +190,56 @@ class FlowTest(unittest.TestCase):
             self.assertEqual(settled.reserved, 0)
         self.assertEqual(self.client.delete(f'/api/admin/users/{created["id"]}',
                                             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 200)
+
+    def test_novelai_generation_uses_actual_anlas_and_serves_image(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'novelai', 'provider': 'novelai', 'opus_free': False,
+            'base_url': 'http://127.0.0.1:9999', 'api_key': 'upstream-secret',
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'anime', 'upstream_account_id': account['id'],
+            'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
+        }).status_code, 200)
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': admin_id, 'amount': '10', 'reference': 'novelai-test',
+        }).status_code, 200)
+        key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {'name': 'generate'}).json()['key']
+        headers = {'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'novelai-1'}
+        payload = {'model': 'anime', 'prompt': 'a red kite in a clear sky',
+                   'parameters': {'steps': 23, 'scale': 4, 'seed': 42}}
+        submitted = self.client.post('/v1/images/generations', json=payload, headers=headers)
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        self.assertEqual(submitted.json()['anlas_cost'], 17)
+        self.assertEqual(self.client.post('/v1/images/generations', json={
+            **payload, 'parameters': {'steps': 24}}, headers=headers).status_code, 409)
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('image_0.png', b'\x89PNG\r\n\x1a\nimage')
+        request = httpx.Request('POST', 'http://127.0.0.1:9999/ai/generate-image')
+        response = httpx.Response(200, content=archive_bytes.getvalue(), request=request)
+        balance_request = httpx.Request('GET', 'http://127.0.0.1:9999/user/subscription')
+        balances = [httpx.Response(200, json={'trainingStepsLeft': {
+            'fixedTrainingStepsLeft': value, 'purchasedTrainingSteps': 0}}, request=balance_request)
+                    for value in (100, 85)]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('app.upstream.IMAGE_DIR', Path(directory)), patch('app.api.user.IMAGE_DIR', Path(directory)), \
+                 patch('app.api.generation.IMAGE_DIR', Path(directory)), \
+                 patch('app.upstream.httpx.get', side_effect=balances), \
+                 patch('app.upstream.httpx.post', return_value=response) as send:
+                self.assertTrue(run_once())
+                sent = send.call_args.kwargs['json']
+                self.assertEqual(sent['model'], 'nai-diffusion-4-5-full')
+                self.assertEqual(sent['parameters']['v4_prompt']['caption']['base_caption'], payload['prompt'])
+                job = self.client.get('/v1/jobs/' + submitted.json()['id'], headers=headers).json()
+                self.assertEqual(job['status'], 'succeeded')
+                self.assertEqual(job['anlas_cost'], 15)
+                self.assertEqual(job['amount'], '1.5000')
+                self.assertEqual(self.client.get(job['result']['data'][0]['url']).status_code, 200)
+                self.assertEqual(self.client.get(f'/v1/jobs/{job["id"]}/image',
+                                                 headers={'Authorization': 'Bearer ' + key}).status_code, 200)
+                self.assertEqual(self.client.get('/api/billing').json()['balance'], '8.5000')
 
     def test_end_to_end_balance_idempotency_payment_and_recovery(self):
         self.login('admin@example.com', 'long-test-password')

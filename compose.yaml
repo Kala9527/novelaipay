@@ -21,6 +21,7 @@ services:
     env_file: .env
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - images:/app/data/images
     command:
       - sh
       - -c
@@ -39,9 +40,11 @@ services:
     env_file: .env
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - images:/app/data/images
     command: python -m app.worker
     depends_on:
       db:
         condition: service_healthy
 volumes:
   pgdata:
+  images:
