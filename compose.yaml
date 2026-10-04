@@ -1,0 +1,37 @@
+name: novelaipay
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  api:
+    image: novelaipay:${APP_VERSION:-0.1.0}
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8009 --workers 1 --proxy-headers --forwarded-allow-ips '*'
+    ports:
+      - "${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-8009}:8009"
+    depends_on:
+      db:
+        condition: service_healthy
+  worker:
+    image: novelaipay:${APP_VERSION:-0.1.0}
+    restart: unless-stopped
+    env_file: .env
+    command: python -m app.worker
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  pgdata:

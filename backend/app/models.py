@@ -1,0 +1,133 @@
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import StrEnum
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .db import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class JobStatus(StrEnum):
+    QUEUED = 'queued'
+    RUNNING = 'running'
+    SUCCEEDED = 'succeeded'
+    FAILED = 'failed'
+    UNCERTAIN = 'uncertain'
+
+
+class User(Base):
+    __tablename__ = 'users'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    balance: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=Decimal('0'))
+    reserved: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=Decimal('0'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApiKey(Base):
+    __tablename__ = 'api_keys'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    prefix: Mapped[str] = mapped_column(String(18), index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    user: Mapped[User] = relationship()
+
+
+class UpstreamAccount(Base):
+    __tablename__ = 'upstream_accounts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    base_url: Mapped[str] = mapped_column(String(500))
+    encrypted_key: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ModelMapping(Base):
+    __tablename__ = 'model_mappings'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    public_name: Mapped[str] = mapped_column(String(100), unique=True)
+    upstream_model: Mapped[str] = mapped_column(String(150))
+    upstream_account_id: Mapped[int] = mapped_column(ForeignKey('upstream_accounts.id'))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    account: Mapped[UpstreamAccount] = relationship()
+
+
+class PriceVersion(Base):
+    __tablename__ = 'price_versions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_mapping_id: Mapped[int] = mapped_column(ForeignKey('model_mappings.id'), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    currency: Mapped[str] = mapped_column(String(3), default='CNY')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GenerationJob(Base):
+    __tablename__ = 'generation_jobs'
+    __table_args__ = (
+        UniqueConstraint('user_id', 'idempotency_key', name='uq_job_user_idempotency'),
+        Index('ix_job_claim', 'status', 'created_at'),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    api_key_id: Mapped[int] = mapped_column(ForeignKey('api_keys.id'))
+    model_mapping_id: Mapped[int] = mapped_column(ForeignKey('model_mappings.id'))
+    price_version_id: Mapped[int] = mapped_column(ForeignKey('price_versions.id'))
+    upstream_account_id: Mapped[int] = mapped_column(ForeignKey('upstream_accounts.id'))
+    public_model: Mapped[str] = mapped_column(String(100))
+    upstream_model: Mapped[str] = mapped_column(String(150))
+    mapping_revision: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    size: Mapped[str] = mapped_column(String(40))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(150))
+    status: Mapped[str] = mapped_column(String(20), default=JobStatus.QUEUED)
+    reserved_amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    result: Mapped[dict | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(String(500))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WalletLedger(Base):
+    __tablename__ = 'wallet_ledger'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    kind: Mapped[str] = mapped_column(String(30))
+    reference: Mapped[str] = mapped_column(String(100), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UsageRecord(Base):
+    __tablename__ = 'usage_records'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey('generation_jobs.id'), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    price_version_id: Mapped[int] = mapped_column(ForeignKey('price_versions.id'))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaymentOrder(Base):
+    __tablename__ = 'payment_orders'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(50))
+    transaction_id: Mapped[str] = mapped_column(String(150))
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint('provider', 'transaction_id', name='uq_payment_transaction'),)

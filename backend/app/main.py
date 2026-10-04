@@ -1,0 +1,35 @@
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from .api import admin, auth, generation, payment, user
+
+
+app = FastAPI(title='Novelaipay', version='0.1.0')
+app.include_router(auth.router)
+app.include_router(user.router)
+app.include_router(admin.router)
+app.include_router(payment.router)
+app.include_router(generation.router)
+
+
+@app.get('/healthz')
+def healthz() -> dict:
+    return {'status': 'ok'}
+
+
+dist = Path(__file__).resolve().parents[2] / 'frontend' / 'dist'
+if dist.exists():
+    app.mount('/assets', StaticFiles(directory=dist / 'assets'), name='assets')
+
+
+@app.get('/{path:path}', include_in_schema=False)
+def spa(path: str):
+    if path.startswith(('api/', 'v1/', 'assets/')):
+        raise HTTPException(404, 'Not found')
+    index = dist / 'index.html'
+    if not index.exists():
+        raise HTTPException(404, 'Frontend has not been built')
+    return FileResponse(index)

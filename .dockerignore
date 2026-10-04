@@ -1,0 +1,9 @@
+.git
+.env
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+frontend/dist
+*.dump
+*.tar.gz
+*.log

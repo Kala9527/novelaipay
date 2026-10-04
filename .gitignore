@@ -1,0 +1,14 @@
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+frontend/node_modules/
+*.dump
+*.tar.gz
+*.log
+backend/test.db
+dev.db
+backend/dev.db
+*.tsbuildinfo
