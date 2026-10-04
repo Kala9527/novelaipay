@@ -14,9 +14,9 @@ from .models import (
 )
 
 
-def require_user_lock(db: Session, user_id: int) -> User:
+def require_user_lock(db: Session, user_id: int, allow_inactive: bool = False) -> User:
     user = db.scalar(select(User).where(User.id == user_id).with_for_update())
-    if user is None or not user.is_active:
+    if user is None or (not allow_inactive and (not user.is_active or user.deleted_at)):
         raise HTTPException(403, 'Account unavailable')
     return user
 
@@ -48,13 +48,19 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
         ).order_by(PriceVersion.id.desc()))
         if price is None:
             raise HTTPException(503, 'Model has no price')
-        active = db.scalar(select(func.count()).select_from(GenerationJob).where(
+        active_total = db.scalar(select(func.count()).select_from(GenerationJob).where(
+            GenerationJob.user_id == user.id,
+            GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
+        ))
+        if active_total >= user.max_concurrency:
+            raise HTTPException(429, 'User concurrent job limit reached')
+        active_model = db.scalar(select(func.count()).select_from(GenerationJob).where(
             GenerationJob.user_id == user.id,
             GenerationJob.model_mapping_id == mapping.id,
             GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
         ))
-        if active >= mapping.max_concurrency:
-            raise HTTPException(429, 'Concurrent job limit reached')
+        if active_model >= mapping.max_concurrency:
+            raise HTTPException(429, 'Model concurrent job limit reached')
         if user.balance - user.reserved < price.amount:
             raise HTTPException(402, 'Insufficient balance')
         user.reserved += price.amount
@@ -137,7 +143,7 @@ def finish_job(db: Session, job_id: str, result: dict | None, error: str | None,
         job = db.scalar(select(GenerationJob).where(GenerationJob.id == job_id).with_for_update())
         if job is None or job.status != JobStatus.RUNNING:
             return
-        user = require_user_lock(db, job.user_id)
+        user = require_user_lock(db, job.user_id, allow_inactive=True)
         job.lease_until = None
         if uncertain:
             job.status = JobStatus.UNCERTAIN
@@ -168,7 +174,7 @@ def resolve_uncertain(db: Session, job_id: str, result: dict | None, error: str 
         job = db.scalar(select(GenerationJob).where(GenerationJob.id == job_id).with_for_update())
         if job is None or job.status != JobStatus.UNCERTAIN:
             raise HTTPException(409, 'Job is not awaiting reconciliation')
-        user = require_user_lock(db, job.user_id)
+        user = require_user_lock(db, job.user_id, allow_inactive=True)
         user.reserved -= job.reserved_amount
         job.finished_at = utcnow()
         job.error = error

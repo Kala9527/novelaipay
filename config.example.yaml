@@ -1,0 +1,8 @@
+admin:
+  email: admin@example.com
+  name: Administrator
+  password: replace_with_a_strong_unique_password
+  max_concurrency: 5
+registration:
+  enabled: true
+  default_max_concurrency: 2

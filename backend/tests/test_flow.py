@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
@@ -16,15 +17,18 @@ os.environ.update({
     'PAYMENT_WEBHOOK_SECRET': 'test-payment-secret',
     'DATABASE_URL': 'sqlite://',
     'COOKIE_SECURE': 'false',
+    'CONFIG_FILE': str(Path(__file__).resolve().parent / 'config.test.yaml'),
 })
 
 from fastapi.testclient import TestClient
 
 from app import db
+from app.bootstrap import main as bootstrap_admin
+from app.config import AdminConfig, RegistrationConfig, get_business_config
 from app.main import app
 from app.models import Base, GenerationJob, JobStatus, UpstreamAccount, utcnow
-from app.security import hash_password
 from app.models import User
+from app.security import verify_password
 from app.services import claim_job, recover_expired
 from app.worker import run_once
 
@@ -36,8 +40,7 @@ class FlowTest(unittest.TestCase):
                                   connect_args={'check_same_thread': False})
         db.SessionLocal.configure(bind=db.engine)
         Base.metadata.create_all(db.engine)
-        with db.SessionLocal.begin() as session:
-            session.add(User(email='admin@example.com', password_hash=hash_password('long-test-password'), is_admin=True))
+        bootstrap_admin()
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -52,6 +55,138 @@ class FlowTest(unittest.TestCase):
     def admin_post(self, path, payload):
         return self.client.post(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
 
+    def admin_patch(self, path, payload):
+        return self.client.patch(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+
+    def test_admin_configuration_updates_single_administrator(self):
+        changed = get_business_config().model_copy(update={
+            'admin': AdminConfig(email='root@example.com', name='New Administrator',
+                                 password='replacement-password-123', max_concurrency=7),
+        })
+        with patch('app.bootstrap.get_business_config', return_value=changed):
+            bootstrap_admin()
+        with db.SessionLocal() as session:
+            administrators = session.scalars(select(User).where(User.is_admin.is_(True))).all()
+            self.assertEqual(len(administrators), 1)
+            self.assertEqual(administrators[0].email, 'root@example.com')
+            self.assertEqual(administrators[0].display_name, 'New Administrator')
+            self.assertEqual(administrators[0].max_concurrency, 7)
+            self.assertTrue(verify_password('replacement-password-123', administrators[0].password_hash))
+
+    def test_registration_user_management_and_key_distribution(self):
+        self.assertEqual(self.client.get('/api/auth/options').json(), {'registration_enabled': True})
+        disabled = get_business_config().model_copy(update={'registration': RegistrationConfig(enabled=False)})
+        with patch('app.api.auth.get_business_config', return_value=disabled):
+            self.assertEqual(self.client.get('/api/auth/options').json(), {'registration_enabled': False})
+            self.assertEqual(self.client.post('/api/auth/register', json={
+                'name': 'Blocked', 'email': 'blocked@example.com', 'password': 'strong-user-password',
+            }).status_code, 403)
+        registered = self.client.post('/api/auth/register', json={
+            'name': 'Registered User', 'email': 'registered@example.com', 'password': 'strong-user-password',
+        })
+        self.assertEqual(registered.status_code, 200, registered.text)
+        user_id = registered.json()['id']
+        self.assertEqual(registered.json()['role'], 'user')
+        self.assertEqual(registered.json()['max_concurrency'], 2)
+        self.assertEqual(self.client.get('/api/admin/users',
+                                         headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 403)
+        self.assertEqual(self.client.post('/api/admin/credit', json={
+            'user_id': user_id, 'amount': '10', 'reference': 'forbidden',
+        }, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 403)
+
+        self.client.cookies.clear()
+        admin = self.login('admin@example.com', 'long-test-password')
+        self.assertEqual(admin['name'], 'Test Administrator')
+        self.assertEqual(admin['max_concurrency'], 5)
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': admin['id'], 'amount': '8.0000', 'reference': 'admin-own',
+        }).status_code, 200)
+        self.assertEqual(self.client.get('/api/auth/me').json()['balance'], '8.0000')
+
+        first_key = self.admin_post(f'/api/admin/users/{user_id}/keys', {'name': 'service-a'})
+        second_key = self.admin_post(f'/api/admin/users/{user_id}/keys', {'name': 'service-b'})
+        self.assertEqual(first_key.status_code, 200, first_key.text)
+        self.assertNotEqual(first_key.json()['key'], second_key.json()['key'])
+        self.assertEqual(len(self.client.get(f'/api/admin/users/{user_id}/keys',
+                                             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()), 2)
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{user_id}', {
+            'name': 'Renamed User', 'max_concurrency': 1,
+        }).status_code, 200)
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{admin["id"]}', {'is_active': False}).status_code, 403)
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{user_id}', {'is_active': False}).status_code, 200)
+
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'email': 'registered@example.com', 'password': 'strong-user-password',
+        }).status_code, 401)
+        self.assertEqual(self.client.get('/v1/jobs/unknown', headers={
+            'Authorization': 'Bearer ' + first_key.json()['key'],
+        }).status_code, 401)
+
+        self.login('admin@example.com', 'long-test-password')
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{user_id}', {'is_active': True}).status_code, 200)
+        self.client.cookies.clear()
+        self.assertEqual(self.login('registered@example.com', 'strong-user-password')['name'], 'Renamed User')
+        self.client.cookies.clear()
+        self.login('admin@example.com', 'long-test-password')
+        deleted = self.client.delete(f'/api/admin/users/{user_id}',
+                                     headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(self.client.delete(f'/api/admin/users/{admin["id"]}',
+                                            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 403)
+        self.assertFalse(any(row['id'] == user_id for row in self.client.get('/api/admin/users',
+                          headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()))
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'email': 'registered@example.com', 'password': 'strong-user-password',
+        }).status_code, 401)
+        self.login('admin@example.com', 'long-test-password')
+        archived = self.client.get('/api/admin/users?include_deleted=true',
+                                   headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()
+        self.assertTrue(next(row for row in archived if row['id'] == user_id)['deleted_at'])
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{user_id}', {'is_active': True}).status_code, 200)
+        self.client.cookies.clear()
+        self.assertEqual(self.login('registered@example.com', 'strong-user-password')['name'], 'Renamed User')
+        self.assertEqual(self.client.get('/v1/jobs/unknown', headers={
+            'Authorization': 'Bearer ' + first_key.json()['key'],
+        }).status_code, 401)
+
+    def test_user_concurrency_limit(self):
+        self.login('admin@example.com', 'long-test-password')
+        upstream = self.admin_post('/api/admin/upstreams', {
+            'name': 'test', 'base_url': 'http://127.0.0.1:9999/v1', 'api_key': 'upstream-secret',
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'model', 'upstream_account_id': upstream['id'],
+            'upstream_model': 'image', 'price': '1.0000', 'max_concurrency': 5,
+        }).status_code, 200)
+        created = self.admin_post('/api/admin/users', {
+            'name': 'Limited User', 'email': 'limited@example.com',
+            'password': 'limited-password-123', 'max_concurrency': 1,
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': created['id'], 'amount': '10.0000', 'reference': 'funded',
+        }).status_code, 200)
+        key = self.admin_post(f'/api/admin/users/{created["id"]}/keys', {'name': 'worker'}).json()['key']
+        headers = {'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'first'}
+        payload = {'model': 'model', 'prompt': 'Sunrise'}
+        first = self.client.post('/v1/images/generations', json=payload, headers=headers)
+        self.assertEqual(first.status_code, 202, first.text)
+        second = self.client.post('/v1/images/generations', json=payload,
+                                  headers={**headers, 'Idempotency-Key': 'second'})
+        self.assertEqual(second.status_code, 429, second.text)
+        self.assertEqual(self.client.delete(f'/api/admin/users/{created["id"]}',
+                                            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 409)
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{created["id"]}', {'is_active': False}).status_code, 200)
+        with patch('app.worker.OpenAIImageAdapter.generate', return_value={'data': [{'url': 'https://example.com/image.png'}]}):
+            self.assertTrue(run_once())
+        with db.SessionLocal() as session:
+            settled = session.get(User, created['id'])
+            self.assertEqual(settled.balance, 9)
+            self.assertEqual(settled.reserved, 0)
+        self.assertEqual(self.client.delete(f'/api/admin/users/{created["id"]}',
+                                            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 200)
+
     def test_end_to_end_balance_idempotency_payment_and_recovery(self):
         self.login('admin@example.com', 'long-test-password')
         upstream = self.admin_post('/api/admin/upstreams', {
@@ -63,7 +198,8 @@ class FlowTest(unittest.TestCase):
             'upstream_model': 'test-image', 'price': '3.0000', 'max_concurrency': 3,
         })
         self.assertEqual(mapping.status_code, 200, mapping.text)
-        user = self.admin_post('/api/admin/users', {'email': 'user@example.com', 'password': 'user-long-password'})
+        user = self.admin_post('/api/admin/users', {'name': 'Image User', 'email': 'user@example.com',
+                                                    'password': 'user-long-password'})
         self.assertEqual(user.status_code, 200, user.text)
         user_id = user.json()['id']
         self.assertEqual(self.admin_post('/api/admin/credit', {

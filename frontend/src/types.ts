@@ -1,4 +1,4 @@
-export type User = { id: number; email: string; is_admin: boolean; balance: string; reserved: string }
+export type User = { id: number; email: string; name: string; role: 'admin' | 'user'; is_admin: boolean; max_concurrency: number; balance: string; reserved: string }
 export type Key = { id: number; name: string; prefix: string; created_at: string; revoked_at: string | null; key?: string }
 export type Model = { name: string; price: string; currency: string; max_concurrency: number }
 export type Job = { id: string; model: string; prompt: string; size: string; status: string; amount: string; result: { data: { url: string }[] } | null; error: string | null; created_at: string; finished_at: string | null }
@@ -6,4 +6,4 @@ export type Ledger = { id: number; kind: string; amount: string; reference: stri
 export type Billing = { balance: string; reserved: string; ledger: Ledger[]; usage: { job_id: string; amount: string; price_version_id: number; created_at: string }[] }
 export type Upstream = { id: number; name: string; base_url: string; enabled: boolean }
 export type Mapping = { id: number; public_name: string; upstream_account_id: number; upstream_model: string; enabled: boolean; max_concurrency: number; revision: number; price: string | null }
-export type AdminUser = { id: number; email: string; balance: string; reserved: string; is_active: boolean }
+export type AdminUser = User & { is_active: boolean; deleted_at: string | null }

@@ -1,4 +1,5 @@
 .env
+config.yaml
 *.pyc
 __pycache__/
 .pytest_cache/
@@ -11,4 +12,5 @@ frontend/node_modules/
 backend/test.db
 dev.db
 backend/dev.db
+*.db
 *.tsbuildinfo

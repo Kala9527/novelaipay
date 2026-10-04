@@ -3,15 +3,15 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import GenerationJob, ModelMapping, PriceVersion, UpstreamAccount, User
-from ..security import encrypt_upstream_key, hash_password
+from ..models import ApiKey, GenerationJob, JobStatus, ModelMapping, PriceVersion, UpstreamAccount, User, utcnow
+from ..security import encrypt_upstream_key, hash_password, new_api_key
 from ..services import credit_wallet, resolve_uncertain
 from .deps import admin_user
-from .user import job_view
+from .user import job_view, key_view
 
 
 router = APIRouter(prefix='/api/admin', tags=['admin'])
@@ -39,8 +39,20 @@ class CreditRequest(BaseModel):
 
 
 class UserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
     email: EmailStr
     password: str = Field(min_length=12, max_length=200)
+    max_concurrency: int = Field(default=2, ge=1, le=100)
+
+
+class UserUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    max_concurrency: int | None = Field(default=None, ge=1, le=100)
+    is_active: bool | None = None
+
+
+class KeyIssue(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
 
 
 class Resolution(BaseModel):
@@ -50,22 +62,115 @@ class Resolution(BaseModel):
 
 
 @router.get('/users')
-def users(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
-    return [{'id': u.id, 'email': u.email, 'balance': str(u.balance),
-             'reserved': str(u.reserved), 'is_active': u.is_active}
-            for u in db.scalars(select(User).order_by(User.id.desc()).limit(100))]
+def users(include_deleted: bool = False, _: User = Depends(admin_user),
+          db: Session = Depends(get_db)) -> list[dict]:
+    query = select(User)
+    if not include_deleted:
+        query = query.where(User.deleted_at.is_(None))
+    return [{'id': u.id, 'name': u.display_name, 'email': u.email,
+             'role': 'admin' if u.is_admin else 'user', 'is_admin': u.is_admin,
+             'balance': str(u.balance), 'reserved': str(u.reserved),
+             'max_concurrency': u.max_concurrency, 'is_active': u.is_active,
+             'deleted_at': u.deleted_at}
+            for u in db.scalars(query.order_by(User.id.desc()).limit(100))]
 
 
 @router.post('/users')
 def create_user(payload: UserCreate, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
     email = payload.email.strip().lower()
+    if not payload.name.strip():
+        raise HTTPException(422, 'Name required')
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(409, 'Email already exists')
-    row = User(email=email, password_hash=hash_password(payload.password))
+    row = User(email=email, display_name=payload.name.strip(),
+               password_hash=hash_password(payload.password),
+               max_concurrency=payload.max_concurrency)
     db.add(row)
     db.commit()
     db.refresh(row)
-    return {'id': row.id, 'email': row.email}
+    return {'id': row.id, 'email': row.email, 'name': row.display_name}
+
+
+@router.patch('/users/{user_id}')
+def update_user(user_id: int, payload: UserUpdate, _: User = Depends(admin_user),
+                db: Session = Depends(get_db)) -> dict:
+    db.commit()
+    with db.begin():
+        row = db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if row is None:
+            raise HTTPException(404, 'User not found')
+        if row.is_admin:
+            raise HTTPException(403, 'Administrator is managed through config.yaml')
+        if row.deleted_at:
+            if payload.is_active is not True:
+                raise HTTPException(409, 'Restore user before editing')
+            row.deleted_at = None
+        if payload.name is not None:
+            if not payload.name.strip():
+                raise HTTPException(422, 'Name required')
+            row.display_name = payload.name.strip()
+        if payload.max_concurrency is not None:
+            row.max_concurrency = payload.max_concurrency
+        if payload.is_active is not None:
+            row.is_active = payload.is_active
+    return {'ok': True}
+
+
+@router.delete('/users/{user_id}')
+def delete_user(user_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    db.commit()
+    with db.begin():
+        row = db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if row is None or row.deleted_at:
+            raise HTTPException(404, 'User not found')
+        if row.is_admin:
+            raise HTTPException(403, 'Administrator cannot be deleted')
+        active = db.scalar(select(func.count()).select_from(GenerationJob).where(
+            GenerationJob.user_id == row.id,
+            GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
+        ))
+        if active or row.reserved:
+            raise HTTPException(409, 'Resolve active jobs before deleting user')
+        row.is_active = False
+        row.deleted_at = utcnow()
+        for key in db.scalars(select(ApiKey).where(ApiKey.user_id == row.id, ApiKey.revoked_at.is_(None))):
+            key.revoked_at = utcnow()
+    return {'ok': True}
+
+
+@router.get('/users/{user_id}/keys')
+def user_keys(user_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+    row = db.get(User, user_id)
+    if row is None or row.deleted_at:
+        raise HTTPException(404, 'User not found')
+    return [key_view(key) for key in db.scalars(select(ApiKey).where(
+        ApiKey.user_id == user_id, ApiKey.revoked_at.is_(None),
+    ).order_by(ApiKey.id.desc()))]
+
+
+@router.post('/users/{user_id}/keys')
+def issue_user_key(user_id: int, payload: KeyIssue, _: User = Depends(admin_user),
+                   db: Session = Depends(get_db)) -> dict:
+    row = db.get(User, user_id)
+    if row is None or row.deleted_at or not row.is_active:
+        raise HTTPException(404, 'Active user not found')
+    raw, prefix, digest = new_api_key()
+    key = ApiKey(user_id=row.id, name=payload.name, prefix=prefix, key_hash=digest)
+    db.add(key)
+    db.commit()
+    db.refresh(key)
+    return {**key_view(key), 'key': raw}
+
+
+@router.delete('/users/{user_id}/keys/{key_id}')
+def revoke_user_key(user_id: int, key_id: int, _: User = Depends(admin_user),
+                    db: Session = Depends(get_db)) -> dict:
+    key = db.scalar(select(ApiKey).where(ApiKey.id == key_id, ApiKey.user_id == user_id))
+    if key is None:
+        raise HTTPException(404, 'Key not found')
+    key.revoked_at = utcnow()
+    db.commit()
+    return {'ok': True}
 
 
 @router.post('/credit')

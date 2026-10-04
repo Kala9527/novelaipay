@@ -24,9 +24,12 @@ class User(Base):
     __tablename__ = 'users'
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(80), default='')
     password_hash: Mapped[str] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     balance: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=Decimal('0'))
     reserved: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=Decimal('0'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

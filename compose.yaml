@@ -15,20 +15,30 @@ services:
       timeout: 5s
       retries: 5
   api:
-    image: novelaipay:${APP_VERSION:-0.1.0}
+    image: novelaipay:${APP_VERSION:-0.2.0}
     build: .
     restart: unless-stopped
     env_file: .env
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8009 --workers 1 --proxy-headers --forwarded-allow-ips '*'
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.bootstrap &&
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8009 --workers 1
+        --proxy-headers --forwarded-allow-ips '*'
     ports:
       - "${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-8009}:8009"
     depends_on:
       db:
         condition: service_healthy
   worker:
-    image: novelaipay:${APP_VERSION:-0.1.0}
+    image: novelaipay:${APP_VERSION:-0.2.0}
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
     command: python -m app.worker
     depends_on:
       db:

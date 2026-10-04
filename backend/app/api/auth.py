@@ -5,7 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..config import get_business_config, get_settings
 from ..db import get_db
 from ..models import User
 from ..security import create_session, hash_password, verify_password
@@ -20,9 +20,17 @@ class Credentials(BaseModel):
     password: str = Field(min_length=8, max_length=200)
 
 
+class Registration(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=200)
+
+
 def user_view(user: User) -> dict:
     return {
-        'id': user.id, 'email': user.email, 'is_admin': user.is_admin,
+        'id': user.id, 'email': user.email, 'name': user.display_name,
+        'role': 'admin' if user.is_admin else 'user', 'is_admin': user.is_admin,
+        'max_concurrency': user.max_concurrency,
         'balance': str(user.balance), 'reserved': str(user.reserved),
     }
 
@@ -35,13 +43,23 @@ def set_auth_cookies(response: Response, user: User) -> None:
                         secure=secure, samesite='lax', max_age=43200)
 
 
+@router.get('/options')
+def options() -> dict:
+    return {'registration_enabled': get_business_config().registration.enabled}
+
+
 @router.post('/register')
-def register(payload: Credentials, response: Response, db: Session = Depends(get_db)) -> dict:
-    if not get_settings().allow_registration:
+def register(payload: Registration, response: Response, db: Session = Depends(get_db)) -> dict:
+    registration = get_business_config().registration
+    if not registration.enabled:
         raise HTTPException(403, 'Registration disabled')
+    if not payload.name.strip():
+        raise HTTPException(422, 'Name required')
     if db.scalar(select(User).where(User.email == payload.email.lower())):
         raise HTTPException(409, 'Email already registered')
-    user = User(email=payload.email.lower(), password_hash=hash_password(payload.password))
+    user = User(email=payload.email.lower(), display_name=payload.name.strip(),
+                password_hash=hash_password(payload.password),
+                max_concurrency=registration.default_max_concurrency)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -52,7 +70,7 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
 @router.post('/login')
 def login(payload: Credentials, response: Response, db: Session = Depends(get_db)) -> dict:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
-    if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
+    if user is None or not user.is_active or user.deleted_at or not verify_password(payload.password, user.password_hash):
         raise HTTPException(401, 'Invalid credentials')
     set_auth_cookies(response, user)
     return user_view(user)

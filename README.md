@@ -10,7 +10,9 @@ conda activate 'D:\miniconda3_envs\novelaipay'
 python -m pip install -r backend\requirements.txt
 npm ci --prefix frontend
 Copy-Item .env.example .env
-# Edit .env; for local SQLite use DATABASE_URL=sqlite:///./dev.db and COOKIE_SECURE=false.
+Copy-Item config.example.yaml config.yaml
+# Edit .env (secrets/DB) and config.yaml (admin account/registration).
+# For local SQLite use DATABASE_URL=sqlite:///./dev.db and COOKIE_SECURE=false.
 cd backend
 alembic upgrade head
 python -m app.bootstrap
@@ -24,5 +26,7 @@ Set `UPSTREAM_KEY_ENCRYPTION_KEY` to a Fernet key generated with:
 ```powershell
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+`config.yaml` is ignored by Git. Its `admin` section is the source of truth for the single administrator's email, display name, password and concurrent job limit. Re-run `python -m app.bootstrap` after changing it locally; Compose runs bootstrap when the API starts. Users can self-register when `registration.enabled` is true, or an administrator can add them. Administrator deletion is blocked; ordinary user deletion archives the account and preserves its balance, ledger and job history. The administrator can restore an archived account, then issue new API keys.
 
 See [开发部署文档.md](开发部署文档.md) for the Ubuntu VM, production image transfer, API examples and troubleshooting.

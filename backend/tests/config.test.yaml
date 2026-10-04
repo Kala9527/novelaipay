@@ -1,0 +1,8 @@
+admin:
+  email: admin@example.com
+  name: Test Administrator
+  password: long-test-password
+  max_concurrency: 5
+registration:
+  enabled: true
+  default_max_concurrency: 2

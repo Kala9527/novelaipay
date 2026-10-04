@@ -15,7 +15,7 @@ def current_user(
 ) -> User:
     user_id = decode_session(session) if session else None
     user = db.get(User, user_id) if user_id else None
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or user.deleted_at:
         raise HTTPException(401, 'Sign in required')
     return user
 
@@ -44,6 +44,6 @@ def downstream_key(
         raise HTTPException(401, 'API key required')
     raw = authorization[7:]
     key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(raw)))
-    if key is None or key.revoked_at or not key.user.is_active:
+    if key is None or key.revoked_at or not key.user.is_active or key.user.deleted_at:
         raise HTTPException(401, 'Invalid API key')
     return key

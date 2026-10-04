@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from .api import admin, auth, generation, payment, user
 
 
-app = FastAPI(title='Novelaipay', version='0.1.0')
+app = FastAPI(title='Novelaipay', version='0.2.0')
 app.include_router(auth.router)
 app.include_router(user.router)
 app.include_router(admin.router)

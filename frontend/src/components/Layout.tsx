@@ -21,7 +21,7 @@ export function Layout({ user, refresh }: { user: User; refresh: () => void }) {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Activity size={19} strokeWidth={2.4} /></span><div><strong>Novelaipay</strong><small>IMAGE API CONSOLE</small></div></div>
       <nav className="side-nav">{links.map(({ to, label, icon: Icon }) => <NavLink key={to} end={to === '/'} to={to} className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}><Icon size={18} />{label}</NavLink>)}</nav>
-      <div className="sidebar-bottom"><div className="sidebar-label">账户余额</div><div className="sidebar-balance">{formatMoney(user.balance)}</div><button className="account-button" onClick={signOut} title="退出登录"><span>{user.email}</span><ArrowRightFromLine size={17} /></button></div>
+      <div className="sidebar-bottom"><div className="sidebar-label">账户余额</div><div className="sidebar-balance">{formatMoney(user.balance)}</div><button className="account-button" onClick={signOut} title="退出登录"><span>{user.name || user.email}</span><ArrowRightFromLine size={17} /></button></div>
     </aside>
     <main className="main-area"><header className="mobile-header"><span className="brand-mini">Novelaipay</span><span>{formatMoney(user.balance)}</span></header><Outlet /></main>
   </div>
