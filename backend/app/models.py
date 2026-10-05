@@ -39,6 +39,7 @@ class ApiKey(Base):
     __tablename__ = 'api_keys'
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey('upstream_groups.id'), index=True)
     name: Mapped[str] = mapped_column(String(80))
     prefix: Mapped[str] = mapped_column(String(18), index=True)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
@@ -57,12 +58,40 @@ class UpstreamAccount(Base):
     provider: Mapped[str] = mapped_column(String(20), default='openai')
     opus_free: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=10)
+
+
+class UpstreamGroup(Base):
+    __tablename__ = 'upstream_groups'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=10)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class GroupAccount(Base):
+    __tablename__ = 'group_accounts'
+    __table_args__ = (UniqueConstraint('group_id', 'account_id', name='uq_group_account'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey('upstream_groups.id'), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey('upstream_accounts.id'), index=True)
+
+
+class ModelRoute(Base):
+    __tablename__ = 'model_routes'
+    __table_args__ = (UniqueConstraint('model_mapping_id', 'account_id', name='uq_model_route'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_mapping_id: Mapped[int] = mapped_column(ForeignKey('model_mappings.id'), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey('upstream_accounts.id'), index=True)
+    upstream_model: Mapped[str] = mapped_column(String(150))
 
 
 class ModelMapping(Base):
     __tablename__ = 'model_mappings'
     id: Mapped[int] = mapped_column(primary_key=True)
-    public_name: Mapped[str] = mapped_column(String(100), unique=True)
+    __table_args__ = (UniqueConstraint('group_id', 'public_name', name='uq_group_public_model'),)
+    group_id: Mapped[int] = mapped_column(ForeignKey('upstream_groups.id'), index=True)
+    public_name: Mapped[str] = mapped_column(String(100))
     upstream_model: Mapped[str] = mapped_column(String(150))
     upstream_account_id: Mapped[int] = mapped_column(ForeignKey('upstream_accounts.id'))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -91,6 +120,7 @@ class GenerationJob(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     api_key_id: Mapped[int] = mapped_column(ForeignKey('api_keys.id'))
+    group_id: Mapped[int | None] = mapped_column(ForeignKey('upstream_groups.id'), index=True)
     model_mapping_id: Mapped[int] = mapped_column(ForeignKey('model_mappings.id'))
     price_version_id: Mapped[int] = mapped_column(ForeignKey('price_versions.id'))
     upstream_account_id: Mapped[int] = mapped_column(ForeignKey('upstream_accounts.id'))
@@ -101,6 +131,7 @@ class GenerationJob(Base):
     size: Mapped[str] = mapped_column(String(40))
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     anlas_cost: Mapped[int | None] = mapped_column(Integer)
+    billing_overlap: Mapped[bool] = mapped_column(Boolean, default=False)
     request_hash: Mapped[str] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(150))
     status: Mapped[str] = mapped_column(String(20), default=JobStatus.QUEUED)
@@ -121,6 +152,7 @@ class WalletLedger(Base):
     kind: Mapped[str] = mapped_column(String(30))
     reference: Mapped[str] = mapped_column(String(100), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class UsageRecord(Base):
@@ -131,6 +163,7 @@ class UsageRecord(Base):
     price_version_id: Mapped[int] = mapped_column(ForeignKey('price_versions.id'))
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PaymentOrder(Base):

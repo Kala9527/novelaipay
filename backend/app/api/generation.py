@@ -37,7 +37,7 @@ def generate(
 @router.get('/jobs/{job_id}')
 def get_job(job_id: str, api_key: ApiKey = Depends(downstream_key), db: Session = Depends(get_db)) -> dict:
     job = db.get(GenerationJob, job_id)
-    if job is None or job.user_id != api_key.user_id:
+    if job is None or job.user_id != api_key.user_id or job.group_id != api_key.group_id:
         raise HTTPException(404, 'Job not found')
     return job_view(job)
 
@@ -47,6 +47,7 @@ def get_job_image(job_id: str, api_key: ApiKey = Depends(downstream_key),
                   db: Session = Depends(get_db)):
     job = db.get(GenerationJob, job_id)
     image = image_path(job_id)
-    if job is None or job.user_id != api_key.user_id or job.status != 'succeeded' or image is None:
+    if (job is None or job.user_id != api_key.user_id or job.group_id != api_key.group_id or
+            job.status != 'succeeded' or image is None):
         raise HTTPException(404, 'Image not found')
     return FileResponse(image, media_type='image/png' if image.suffix == '.png' else 'image/jpeg', filename=image.name)

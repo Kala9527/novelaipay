@@ -60,6 +60,8 @@ export function JobsPage({ userId }: { userId: number }) {
   useEffect(() => { load(); const id = window.setInterval(load, 10000); return () => clearInterval(id) }, [userId])
   useEffect(() => { api<Model[]>('/api/models').then(rows => { setModels(rows); if (rows.length) setForm(current => ({ ...current, model: current.model || rows[0].name })) }).catch(e => setError(e.message)) }, [])
   useEffect(() => { api<Key[]>('/api/keys').then(rows => { setKeys(rows); if (rows.length) setKeyId(String(rows[0].id)) }).catch(e => setError(e.message)) }, [])
+  const availableModels = models.filter(row => !keyId || row.group_id === keys.find(key => key.id === Number(keyId))?.group_id)
+  useEffect(() => { if (availableModels.length && !availableModels.some(row => row.name === form.model)) setForm(current => ({ ...current, model: availableModels[0].name })) }, [keyId, models, keys])
   async function generate(event: FormEvent) {
     event.preventDefault(); setError(''); setBusy(true)
     try {
@@ -91,13 +93,13 @@ export function JobsPage({ userId }: { userId: number }) {
     } catch (e) { setError((e as Error).message) }
     finally { setBusy(false) }
   }
-  const model = models.find(row => row.name === form.model)
+  const model = availableModels.find(row => row.name === form.model)
   return <div className="studio-page">
     <header className="studio-header"><div><span className="studio-eyebrow"><Sparkles size={13} /> IMAGE STUDIO</span><h1>生图工作台</h1></div><div className="studio-header-meta">{model && <span>{model.name}</span>}<span>{model ? `${formatMoney(model.price)} / ${model.billing_mode === 'anlas' ? 'Anlas' : '次'}${Number(model.extra_amount) ? ` + ${formatMoney(model.extra_amount)} / 次` : ''}` : '选择模型'}</span></div></header>
     {error && <Notice text={error} error />}
     <div className="studio-grid">
     {models.length > 0 && <form className="form-grid studio-controls" onSubmit={generate}>
-      <label>模型<select required value={form.model} onChange={e => setForm(current => ({ ...current, model: e.target.value, smea: false, smea_dyn: false }))}>{models.map(model => <option key={model.name} value={model.name}>{model.name}</option>)}</select></label>
+      <label>模型<select required value={form.model} onChange={e => setForm(current => ({ ...current, model: e.target.value, smea: false, smea_dyn: false }))}>{availableModels.map(model => <option key={`${model.group_id}-${model.name}`} value={model.name}>{model.name}</option>)}</select></label>
       <label>API 密钥{keys.length ? <select required value={keyId} onChange={e => setKeyId(e.target.value)}>{keys.map(key => <option key={key.id} value={key.id}>{key.name} · {key.prefix}</option>)}</select> : <input type="password" required autoComplete="off" value={form.key} onChange={e => setForm({ ...form, key: e.target.value })} placeholder="先在 API 密钥页面创建密钥" />}</label>
       <label className="wide">提示词<textarea required value={form.prompt} onChange={e => setForm({ ...form, prompt: e.target.value })} /></label>
       <label className="wide">排除内容<textarea value={form.negative_prompt} onChange={e => setForm({ ...form, negative_prompt: e.target.value })} /></label>
@@ -132,7 +134,7 @@ export function JobsPage({ userId }: { userId: number }) {
       <label className="check-label"><input type="checkbox" checked={form.variety_boost} onChange={e => setForm({ ...form, variety_boost: e.target.checked })} />Variety+</label>
       <label className="check-label" title={model?.supports_smea ? '' : '当前模型不支持 SMEA'}><input type="checkbox" disabled={!model?.supports_smea} checked={form.smea && !!model?.supports_smea} onChange={e => setForm({ ...form, smea: e.target.checked, smea_dyn: e.target.checked ? form.smea_dyn : false })} />SMEA</label>
       <label className="check-label" title={model?.supports_smea ? '' : '当前模型不支持 SMEA DYN'}><input type="checkbox" disabled={!model?.supports_smea || !form.smea} checked={form.smea_dyn && !!model?.supports_smea} onChange={e => setForm({ ...form, smea_dyn: e.target.checked })} />SMEA DYN</label>
-      <button className="button primary studio-generate" disabled={busy || pendingReads > 0}><WandSparkles size={16} />{busy ? '提交中' : pendingReads > 0 ? '读取图片中' : '生成图片'}</button>
+      <button className="button primary studio-generate" disabled={busy || pendingReads > 0 || !model}><WandSparkles size={16} />{busy ? '提交中' : pendingReads > 0 ? '读取图片中' : '生成图片'}</button>
     </form>}
     <section className="studio-canvas"><div className="studio-pane-title"><span>预览</span>{selected && <Status value={selected.status} />}</div>{selected?.result?.data?.[0]?.url ? <div className="studio-result"><img src={selected.result.data[0].url} alt={selected.prompt} /><a className="button secondary" href={selected.result.data[0].url} download={`${selected.id}.png`}><Download size={16} />下载图片</a></div> : <div className="studio-empty"><ImageIcon size={48} strokeWidth={1.3} /><strong>{selected?.status === 'running' || selected?.status === 'queued' ? '正在生成图片' : '暂无生成结果'}</strong>{selected?.error && <span>{selected.error}</span>}</div>}{selected && <div className="studio-result-meta"><span>{selected.model}</span><span>{selected.size}</span><span>{formatMoney(selected.amount)}</span></div>}</section>
     <aside className="studio-history"><div className="studio-pane-title"><span>最近生成</span><small>{images.length} / 5</small></div>{images.length ? <div className="studio-history-list">{images.map(image => <button type="button" className="studio-history-item" key={image.id} onClick={() => setSelected(jobs.find(job => job.id === image.id) || null)}><img src={image.url} alt="" /><span><strong>{image.model}</strong><small>{formatDate(image.createdAt)}</small></span></button>)}</div> : <div className="studio-history-empty"><ImageIcon size={26} /><span>{jobs.some(job => ['queued', 'running'].includes(job.status)) ? '图片生成中' : '暂无本地图片'}</span></div>}</aside>

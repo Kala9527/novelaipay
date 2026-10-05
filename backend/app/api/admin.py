@@ -1,5 +1,6 @@
 from decimal import Decimal
 from urllib.parse import urlparse
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..config import get_settings
-from ..models import ApiKey, GenerationJob, JobStatus, ModelMapping, PriceVersion, UpstreamAccount, User, utcnow
+from ..models import ApiKey, GenerationJob, GroupAccount, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, User, utcnow
 from ..security import decrypt_upstream_key, encrypt_upstream_key, hash_password, new_api_key
 from ..services import credit_wallet, resolve_uncertain
 from ..upstream import UpstreamUncertain, store_remote_image
@@ -19,21 +20,49 @@ from .user import job_view, key_view
 router = APIRouter(prefix='/api/admin', tags=['admin'])
 
 
+def default_group(db: Session) -> UpstreamGroup:
+    group = db.scalar(select(UpstreamGroup).order_by(UpstreamGroup.id))
+    if group is None:
+        group = UpstreamGroup(name='默认分组')
+        db.add(group)
+        db.flush()
+    return group
+
+
 class UpstreamCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(max_length=500)
     api_key: str = Field(min_length=1)
     provider: str = Field(default='openai', pattern='^(openai|novelai)$')
     opus_free: bool = False
+    max_concurrency: int = Field(default=10, ge=1, le=1000)
+
+
+class UpstreamUpdate(BaseModel):
+    max_concurrency: int = Field(ge=1, le=1000)
+    enabled: bool
+
+
+class GroupUpsert(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    max_concurrency: int = Field(default=10, ge=1, le=1000)
+    account_ids: list[int] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class RouteInput(BaseModel):
+    account_id: int
+    upstream_model: str = Field(min_length=1, max_length=150)
 
 
 class MappingUpsert(BaseModel):
     public_name: str = Field(pattern=r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$')
-    upstream_account_id: int
-    upstream_model: str = Field(min_length=1, max_length=150)
+    group_id: int | None = None
+    upstream_account_id: int | None = None
+    upstream_model: str | None = None
+    routes: list[RouteInput] = Field(default_factory=list)
     price: Decimal = Field(gt=0, max_digits=14, decimal_places=4)
     extra_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=4)
-    max_concurrency: int = Field(default=2, ge=1, le=100)
     enabled: bool = True
 
 
@@ -58,6 +87,7 @@ class UserUpdate(BaseModel):
 
 class KeyIssue(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    group_id: int | None = None
 
 
 class Resolution(BaseModel):
@@ -160,8 +190,11 @@ def issue_user_key(user_id: int, payload: KeyIssue, _: User = Depends(admin_user
     row = db.get(User, user_id)
     if row is None or row.deleted_at or not row.is_active:
         raise HTTPException(404, 'Active user not found')
+    group = db.get(UpstreamGroup, payload.group_id) if payload.group_id else default_group(db)
+    if group is None or not group.enabled:
+        raise HTTPException(404, 'Group unavailable')
     raw, prefix, digest = new_api_key()
-    key = ApiKey(user_id=row.id, name=payload.name, prefix=prefix, key_hash=digest,
+    key = ApiKey(user_id=row.id, group_id=group.id, name=payload.name, prefix=prefix, key_hash=digest,
                  encrypted_key=encrypt_upstream_key(raw))
     db.add(key)
     db.commit()
@@ -199,7 +232,8 @@ def credit(payload: CreditRequest, _: User = Depends(admin_user), db: Session = 
 @router.get('/upstreams')
 def upstreams(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
     return [{'id': row.id, 'name': row.name, 'base_url': row.base_url,
-             'provider': row.provider, 'opus_free': row.opus_free, 'enabled': row.enabled}
+             'provider': row.provider, 'opus_free': row.opus_free, 'enabled': row.enabled,
+             'max_concurrency': row.max_concurrency}
             for row in db.scalars(select(UpstreamAccount).order_by(UpstreamAccount.id))]
 
 
@@ -214,12 +248,88 @@ def create_upstream(payload: UpstreamCreate, _: User = Depends(admin_user), db: 
         raise HTTPException(409, 'Upstream name exists')
     account = UpstreamAccount(name=payload.name, base_url=payload.base_url.rstrip('/'),
                               encrypted_key=encrypt_upstream_key(payload.api_key),
-                              provider=payload.provider, opus_free=payload.opus_free)
+                              provider=payload.provider, opus_free=payload.opus_free,
+                              max_concurrency=payload.max_concurrency)
     db.add(account)
+    group = default_group(db)
+    db.flush()
+    db.add(GroupAccount(group_id=group.id, account_id=account.id))
     db.commit()
     db.refresh(account)
     return {'id': account.id, 'name': account.name, 'base_url': account.base_url,
-            'provider': account.provider, 'opus_free': account.opus_free}
+            'provider': account.provider, 'opus_free': account.opus_free,
+            'max_concurrency': account.max_concurrency}
+
+
+@router.patch('/upstreams/{account_id}')
+def update_upstream(account_id: int, payload: UpstreamUpdate, _: User = Depends(admin_user),
+                    db: Session = Depends(get_db)) -> dict:
+    account = db.get(UpstreamAccount, account_id)
+    if account is None:
+        raise HTTPException(404, 'Upstream not found')
+    account.max_concurrency = payload.max_concurrency
+    account.enabled = payload.enabled
+    db.commit()
+    return {'ok': True}
+
+
+@router.get('/upstreams/{account_id}/models')
+def upstream_models(account_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    account = db.get(UpstreamAccount, account_id)
+    if account is None:
+        raise HTTPException(404, 'Upstream not found')
+    if account.provider == 'novelai':
+        # NovelAI does not expose a model-list endpoint.
+        return {'models': ['nai-diffusion-4-curated-preview', 'nai-diffusion-4-full',
+                           'nai-diffusion-4-5-curated', 'nai-diffusion-4-5-full',
+                           'nai-diffusion-3'], 'source': 'supported'}
+    try:
+        response = httpx.get(account.base_url.rstrip('/') + '/models',
+            headers={'Authorization': 'Bearer ' + decrypt_upstream_key(account.encrypted_key)},
+            timeout=get_settings().upstream_timeout_seconds)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        models = sorted({item['id'] for item in data if isinstance(item, dict)
+                         and isinstance(item.get('id'), str)})
+    except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(502, 'Could not retrieve upstream models') from exc
+    return {'models': models, 'source': 'upstream'}
+
+
+@router.get('/groups')
+def groups(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+    return [{'id': row.id, 'name': row.name, 'max_concurrency': row.max_concurrency,
+             'enabled': row.enabled, 'account_ids': list(db.scalars(select(GroupAccount.account_id).where(
+                 GroupAccount.group_id == row.id).order_by(GroupAccount.id)))}
+            for row in db.scalars(select(UpstreamGroup).order_by(UpstreamGroup.id))]
+
+
+@router.post('/groups')
+def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    row = db.scalar(select(UpstreamGroup).where(UpstreamGroup.name == payload.name))
+    if row is None:
+        row = UpstreamGroup(name=payload.name)
+        db.add(row)
+        db.flush()
+    accounts = [db.get(UpstreamAccount, account_id) for account_id in set(payload.account_ids)]
+    if any(account is None for account in accounts):
+        raise HTTPException(404, 'Upstream account not found')
+    row.max_concurrency = payload.max_concurrency
+    row.enabled = payload.enabled
+    selected = {account.id for account in accounts}
+    existing = db.scalars(select(GroupAccount).where(GroupAccount.group_id == row.id)).all()
+    for member in existing:
+        if member.account_id not in selected:
+            routed = db.scalar(select(ModelRoute).join(ModelMapping).where(
+                ModelMapping.group_id == row.id, ModelRoute.account_id == member.account_id))
+            if routed:
+                raise HTTPException(409, 'Remove model routes before removing this account')
+            db.delete(member)
+    current = {member.account_id for member in existing}
+    for account_id in selected - current:
+        db.add(GroupAccount(group_id=row.id, account_id=account_id))
+    db.commit()
+    return {'id': row.id}
 
 
 @router.get('/mappings')
@@ -230,9 +340,14 @@ def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> li
             PriceVersion.id.desc(),
         ))
         result.append({'id': row.id, 'public_name': row.public_name,
+                       'group_id': row.group_id,
                        'upstream_account_id': row.upstream_account_id,
                        'upstream_model': row.upstream_model, 'enabled': row.enabled,
-                       'max_concurrency': row.max_concurrency, 'revision': row.revision,
+                       'max_concurrency': row.max_concurrency,
+                       'routes': [{'account_id': route.account_id, 'upstream_model': route.upstream_model}
+                                  for route in db.scalars(select(ModelRoute).where(ModelRoute.model_mapping_id == row.id)
+                                                          .order_by(ModelRoute.id))],
+                       'revision': row.revision,
                        'price': str(price.amount) if price else None,
                        'extra_amount': str(price.extra_amount) if price else '0.0000',
                        'billing_mode': price.billing_mode if price else None})
@@ -241,27 +356,44 @@ def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> li
 
 @router.post('/mappings')
 def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
-    account = db.get(UpstreamAccount, payload.upstream_account_id)
-    if account is None:
-        raise HTTPException(404, 'Upstream account not found')
+    group = db.get(UpstreamGroup, payload.group_id) if payload.group_id else default_group(db)
+    if group is None:
+        raise HTTPException(404, 'Group not found')
+    routes = payload.routes or ([RouteInput(account_id=payload.upstream_account_id,
+                                           upstream_model=payload.upstream_model)]
+                                if payload.upstream_account_id and payload.upstream_model else [])
+    if not routes or len({route.account_id for route in routes}) != len(routes):
+        raise HTTPException(422, 'Provide distinct upstream routes')
+    members = set(db.scalars(select(GroupAccount.account_id).where(GroupAccount.group_id == group.id)))
+    if any(route.account_id not in members for route in routes):
+        raise HTTPException(422, 'Every route must belong to the group')
+    accounts = [db.get(UpstreamAccount, route.account_id) for route in routes]
+    if any(account is None for account in accounts) or len({account.provider for account in accounts}) != 1:
+        raise HTTPException(422, 'Routes must use the same provider')
+    account = accounts[0]
     extra_amount = payload.extra_amount if payload.extra_amount is not None else (
         Decimal('0.1000') if account.provider == 'novelai' else Decimal('0')
     )
     if account.provider != 'novelai' and extra_amount:
         raise HTTPException(422, 'Per-generation surcharge is only supported for NovelAI models')
-    row = db.scalar(select(ModelMapping).where(ModelMapping.public_name == payload.public_name))
+    row = db.scalar(select(ModelMapping).where(ModelMapping.group_id == group.id,
+                                                ModelMapping.public_name == payload.public_name))
     if row is None:
-        row = ModelMapping(public_name=payload.public_name, upstream_model=payload.upstream_model,
-                           upstream_account_id=account.id, enabled=payload.enabled,
-                           max_concurrency=payload.max_concurrency)
+        row = ModelMapping(public_name=payload.public_name, upstream_model=routes[0].upstream_model,
+                           group_id=group.id, upstream_account_id=account.id, enabled=payload.enabled)
         db.add(row)
         db.flush()
     else:
-        row.upstream_model = payload.upstream_model
         row.upstream_account_id = account.id
         row.enabled = payload.enabled
-        row.max_concurrency = payload.max_concurrency
         row.revision += 1
+    row.upstream_model = routes[0].upstream_model
+    for old in db.scalars(select(ModelRoute).where(ModelRoute.model_mapping_id == row.id)).all():
+        db.delete(old)
+    db.flush()
+    for route in routes:
+        db.add(ModelRoute(model_mapping_id=row.id, account_id=route.account_id,
+                          upstream_model=route.upstream_model))
     price = db.scalar(select(PriceVersion).where(PriceVersion.model_mapping_id == row.id).order_by(
         PriceVersion.id.desc(),
     ))

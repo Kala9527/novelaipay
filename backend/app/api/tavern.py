@@ -126,8 +126,9 @@ def normalize_request(body: dict) -> tuple[str, str, str, ImageParameters]:
 @router.get('/models')
 @router.get('/genarate/models')
 @router.get('/genarate/v1/models')
-def tavern_models(_: ApiKey = Depends(downstream_key), db: Session = Depends(get_db)) -> dict:
-    mappings = db.scalars(select(ModelMapping).where(ModelMapping.enabled.is_(True)).order_by(
+def tavern_models(api_key: ApiKey = Depends(downstream_key), db: Session = Depends(get_db)) -> dict:
+    mappings = db.scalars(select(ModelMapping).where(ModelMapping.enabled.is_(True),
+        ModelMapping.group_id == api_key.group_id).order_by(
         ModelMapping.public_name)).all()
     return {'object': 'list', 'data': [
         {'id': mapping.public_name, 'object': 'model', 'owned_by': 'novelaipay'}
@@ -194,7 +195,7 @@ def tavern_image(job_id: str, token: str, db: Session = Depends(get_db)):
     return FileResponse(image, media_type='image/png' if image.suffix == '.png' else 'image/jpeg', filename=image.name)
 
 
-def raw_novelai_request(body: dict, db: Session) -> tuple[str, str, str, ImageParameters]:
+def raw_novelai_request(body: dict, db: Session, group_id: int | None = None) -> tuple[str, str, str, ImageParameters]:
     if body.get('action', 'generate') not in {'generate', 'img2img', 'infill'}:
         raise HTTPException(422, 'Unsupported image action')
     incoming = body.get('parameters')
@@ -207,10 +208,12 @@ def raw_novelai_request(body: dict, db: Session) -> tuple[str, str, str, ImagePa
     if not isinstance(model_name, str) or not model_name or not isinstance(prompt, str) or not prompt:
         raise HTTPException(422, 'Model and input are required')
     mapping = db.scalar(select(ModelMapping).where(
-        ModelMapping.public_name == model_name, ModelMapping.enabled.is_(True)))
+        ModelMapping.public_name == model_name, ModelMapping.group_id == group_id,
+        ModelMapping.enabled.is_(True)))
     if mapping is None:
         matches = db.scalars(select(ModelMapping).where(
-            ModelMapping.upstream_model == model_name, ModelMapping.enabled.is_(True)
+            ModelMapping.upstream_model == model_name, ModelMapping.group_id == group_id,
+            ModelMapping.enabled.is_(True)
         ).order_by(ModelMapping.id)).all()
         if not matches:
             raise HTTPException(404, 'Model unavailable')
@@ -276,7 +279,7 @@ def raw_novelai_request(body: dict, db: Session) -> tuple[str, str, str, ImagePa
 def novelai_proxy_generate(body: dict, api_key: ApiKey = Depends(downstream_key),
                            idempotency_key: str | None = Header(default=None, alias='Idempotency-Key'),
                            db: Session = Depends(get_db)) -> Response:
-    model, prompt, size, parameters = raw_novelai_request(body, db)
+    model, prompt, size, parameters = raw_novelai_request(body, db, api_key.group_id)
     job = submit_job(db, api_key, model, prompt, size, idempotency_key or str(uuid.uuid4()), parameters)
     _, image = wait_for_image(db, job.id)
     archive = io.BytesIO()
@@ -292,7 +295,8 @@ def novelai_proxy_subscription(api_key: ApiKey = Depends(downstream_key),
                                 db: Session = Depends(get_db)) -> dict:
     user = db.get(User, api_key.user_id)
     prices = db.scalars(select(PriceVersion).join(ModelMapping).join(UpstreamAccount).where(
-        ModelMapping.enabled.is_(True), UpstreamAccount.provider == 'novelai',
+        ModelMapping.enabled.is_(True), ModelMapping.group_id == api_key.group_id,
+        UpstreamAccount.provider == 'novelai',
         PriceVersion.billing_mode == 'anlas').order_by(PriceVersion.id)).all()
     latest = {}
     for price in prices:

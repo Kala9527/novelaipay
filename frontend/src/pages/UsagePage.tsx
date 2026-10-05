@@ -16,6 +16,8 @@ export function UsagePage({ isAdmin }: { isAdmin: boolean }) {
   const [status, setStatus] = useState('')
   const [model, setModel] = useState('')
   const [search, setSearch] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const [page, setPage] = useState(0)
   const [selected, setSelected] = useState<UsageJob | null>(null)
   const [checked, setChecked] = useState<string[]>([])
@@ -30,6 +32,8 @@ export function UsagePage({ isAdmin }: { isAdmin: boolean }) {
       if (status) query.set('status', status)
       if (model) query.set('model', model)
       if (search.trim()) query.set('search', search.trim())
+      if (dateFrom) query.set('date_from', dateFrom)
+      if (dateTo) query.set('date_to', dateTo)
       const result = await api<UsageResponse>(`/api/usage?${query}`)
       setRows(result.items)
       setTotal(result.total)
@@ -38,7 +42,7 @@ export function UsagePage({ isAdmin }: { isAdmin: boolean }) {
       setError('')
     } catch (e) { setError((e as Error).message) }
   }
-  useEffect(() => { load() }, [page, userId, status, model, search, isAdmin])
+  useEffect(() => { load() }, [page, userId, status, model, search, dateFrom, dateTo, isAdmin])
   useEffect(() => {
     api<string[]>('/api/usage/models').then(setModels).catch(e => setError(e.message))
     if (isAdmin) api<AdminUser[]>('/api/admin/users?include_deleted=true').then(setUsers).catch(e => setError(e.message))
@@ -62,6 +66,8 @@ export function UsagePage({ isAdmin }: { isAdmin: boolean }) {
       <label>状态<select value={status} onChange={e => { setPage(0); setStatus(e.target.value) }}><option value="">全部状态</option><option value="queued">排队中</option><option value="running">生成中</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="uncertain">待核对</option></select></label>
       <label>模型<select value={model} onChange={e => { setPage(0); setModel(e.target.value) }}><option value="">全部模型</option>{models.map(item => <option key={item} value={item}>{item}</option>)}</select></label>
       <label>任务 ID<input value={search} onChange={e => { setPage(0); setSearch(e.target.value) }} placeholder="搜索任务 ID" /></label>
+      <label>开始日期 (北京时间)<input type="date" value={dateFrom} onChange={e => { setPage(0); setDateFrom(e.target.value) }} /></label>
+      <label>结束日期 (北京时间)<input type="date" value={dateTo} onChange={e => { setPage(0); setDateTo(e.target.value) }} /></label>
     </div>
     {error && <Notice text={error} error />}
     {isAdmin && checked.length > 0 && <div className="usage-actions"><span>已选择 {checked.length} 条</span><button className="button secondary danger-text" disabled={busy} onClick={() => remove(checked)}><Trash2 size={15} />批量删除</button></div>}

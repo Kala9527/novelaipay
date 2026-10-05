@@ -9,8 +9,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import (
-    ApiKey, GenerationJob, JobStatus, ModelMapping, PaymentOrder, PriceVersion,
-    UpstreamAccount, UsageRecord, User, WalletLedger, utcnow,
+    ApiKey, GenerationJob, JobStatus, ModelMapping, ModelRoute, PaymentOrder, PriceVersion,
+    UpstreamAccount, UpstreamGroup, UsageRecord, User, WalletLedger, utcnow,
 )
 from .novelai import ImageParameters, estimate_anlas, store_image_inputs, validate_size
 
@@ -36,17 +36,25 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
             GenerationJob.user_id == user.id, GenerationJob.idempotency_key == idem,
         ))
         if existing:
-            if existing.request_hash != request_hash:
+            if existing.group_id != api_key.group_id or existing.request_hash != request_hash:
                 raise HTTPException(409, 'Idempotency key used with different request')
             return existing
         mapping = db.scalar(select(ModelMapping).where(
-            ModelMapping.public_name == model_name, ModelMapping.enabled.is_(True),
+            ModelMapping.public_name == model_name, ModelMapping.group_id == api_key.group_id,
+            ModelMapping.enabled.is_(True),
         ))
         if mapping is None:
             raise HTTPException(404, 'Model unavailable')
-        account = db.get(UpstreamAccount, mapping.upstream_account_id)
-        if account is None or not account.enabled:
+        group = db.get(UpstreamGroup, mapping.group_id)
+        if group is None or not group.enabled:
+            raise HTTPException(503, 'Group unavailable')
+        routes = db.scalars(select(ModelRoute).where(ModelRoute.model_mapping_id == mapping.id)
+                            .order_by(ModelRoute.id)).all()
+        options = [(route, db.get(UpstreamAccount, route.account_id)) for route in routes]
+        options = [(route, account) for route, account in options if account and account.enabled]
+        if not options:
             raise HTTPException(503, 'Upstream unavailable')
+        selected_route, account = options[0]
         price = db.scalar(select(PriceVersion).where(
             PriceVersion.model_mapping_id == mapping.id,
         ).order_by(PriceVersion.id.desc()))
@@ -57,8 +65,9 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
         if account.provider == 'novelai':
             try:
                 validate_size(size)
-                anlas_cost = estimate_anlas(mapping.upstream_model, size, parameters,
-                                            account.opus_free)
+                anlas_cost = max(estimate_anlas(route.upstream_model, size, parameters,
+                                                candidate.opus_free)
+                                 for route, candidate in options)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             # Keep room for changes in NovelAI's unpublished price formula.
@@ -69,27 +78,15 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
                 raise HTTPException(422, str(exc)) from exc
         else:
             stored_parameters = store_image_inputs(parameters)
-        active_total = db.scalar(select(func.count()).select_from(GenerationJob).where(
-            GenerationJob.user_id == user.id,
-            GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
-        ))
-        if active_total >= user.max_concurrency:
-            raise HTTPException(429, 'User concurrent job limit reached')
-        active_model = db.scalar(select(func.count()).select_from(GenerationJob).where(
-            GenerationJob.user_id == user.id,
-            GenerationJob.model_mapping_id == mapping.id,
-            GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
-        ))
-        if active_model >= mapping.max_concurrency:
-            raise HTTPException(429, 'Model concurrent job limit reached')
         if user.balance - user.reserved < amount:
             raise HTTPException(402, 'Insufficient balance')
         user.reserved += amount
         job = GenerationJob(
             id=str(uuid.uuid4()), user_id=user.id, api_key_id=api_key.id,
+            group_id=group.id,
             model_mapping_id=mapping.id, price_version_id=price.id,
             upstream_account_id=account.id, public_model=mapping.public_name,
-            upstream_model=mapping.upstream_model, mapping_revision=mapping.revision,
+            upstream_model=selected_route.upstream_model, mapping_revision=mapping.revision,
             prompt=prompt, size=size, parameters=stored_parameters, anlas_cost=anlas_cost,
             request_hash=request_hash, idempotency_key=idem, status=JobStatus.QUEUED,
             reserved_amount=amount,
@@ -142,20 +139,64 @@ def claim_job(db: Session, lease_seconds: int, job_id: str | None = None) -> Gen
             query = query.with_for_update(skip_locked=True)
         job = None
         for candidate in db.scalars(query):
-            account = db.scalar(select(UpstreamAccount).where(
-                UpstreamAccount.id == candidate.upstream_account_id).with_for_update())
-            if account and account.provider == 'novelai':
-                busy = db.scalar(select(func.count()).select_from(GenerationJob).where(
-                    GenerationJob.upstream_account_id == account.id,
-                    GenerationJob.status.in_([JobStatus.RUNNING, JobStatus.UNCERTAIN]),
-                ))
-                if busy:
-                    continue
+            group = db.scalar(select(UpstreamGroup).where(
+                UpstreamGroup.id == candidate.group_id).with_for_update())
+            if group is None or not group.enabled:
+                continue
+            running = db.scalar(select(func.count()).select_from(GenerationJob).where(
+                GenerationJob.group_id == group.id,
+                GenerationJob.status == JobStatus.RUNNING))
+            if running >= group.max_concurrency:
+                continue
+            if not select_available_route(db, candidate):
+                continue
             job = candidate
             job.status = JobStatus.RUNNING
             job.lease_until = utcnow() + timedelta(seconds=lease_seconds)
             break
     return job
+
+
+def select_available_route(db: Session, job: GenerationJob, excluded: set[int] | None = None) -> bool:
+    routes = db.scalars(select(ModelRoute).where(ModelRoute.model_mapping_id == job.model_mapping_id)
+                        .order_by(ModelRoute.account_id)).all()
+    available = []
+    for route in routes:
+        if route.account_id in (excluded or set()):
+            continue
+        account = db.scalar(select(UpstreamAccount).where(
+            UpstreamAccount.id == route.account_id).with_for_update())
+        if account is None or not account.enabled:
+            continue
+        busy = db.scalar(select(func.count()).select_from(GenerationJob).where(
+            GenerationJob.upstream_account_id == account.id,
+            GenerationJob.status.in_([JobStatus.RUNNING, JobStatus.UNCERTAIN])))
+        if busy >= account.max_concurrency:
+            continue
+        available.append((busy, route, account))
+    if not available:
+        return False
+    mapping = db.get(ModelMapping, job.model_mapping_id)
+    busy, route, account = min(available, key=lambda item: (
+        item[0], item[1].account_id != mapping.upstream_account_id, item[1].account_id))
+    if account.provider == 'novelai' and busy:
+        job.billing_overlap = True
+        for overlapping in db.scalars(select(GenerationJob).where(
+                GenerationJob.upstream_account_id == account.id,
+                GenerationJob.status == JobStatus.RUNNING)):
+            overlapping.billing_overlap = True
+    job.upstream_account_id = account.id
+    job.upstream_model = route.upstream_model
+    return True
+
+
+def switch_job_account(db: Session, job_id: str, excluded: set[int]) -> bool:
+    db.rollback()
+    with db.begin():
+        job = db.scalar(select(GenerationJob).where(GenerationJob.id == job_id).with_for_update())
+        if job is None or job.status != JobStatus.RUNNING:
+            return False
+        return select_available_route(db, job, excluded)
 
 
 def recover_expired(db: Session) -> int:
@@ -184,6 +225,10 @@ def finish_job(db: Session, job_id: str, result: dict | None, error: str | None,
         if uncertain:
             job.status = JobStatus.UNCERTAIN
             job.error = error
+            return
+        if result is not None and job.billing_overlap:
+            job.status = JobStatus.UNCERTAIN
+            job.error = 'NovelAI account had overlapping jobs; verify each Anlas charge before settlement'
             return
         charged_amount = job.reserved_amount
         if result is not None and job.anlas_cost is not None:

@@ -8,7 +8,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { KeysPage } from './pages/KeysPage'
 import { JobsPage } from './pages/JobsPage'
 import { UsagePage } from './pages/UsagePage'
-import { BillingPage } from './pages/BillingPage'
+import { BillingRecordsPage } from './pages/BillingRecordsPage'
 import { AdminPage } from './pages/AdminPage'
 
 export function App() {
@@ -29,7 +29,7 @@ export function App() {
       <Route path="/keys" element={<KeysPage />} />
       <Route path="/workshop" element={<JobsPage userId={user?.id ?? 0} />} />
       <Route path="/jobs" element={<UsagePage isAdmin={user?.is_admin ?? false} />} />
-      <Route path="/billing" element={<BillingPage />} />
+      <Route path="/billing" element={<BillingRecordsPage isAdmin={user?.is_admin ?? false} />} />
       <Route path="/admin" element={user?.is_admin ? <AdminPage /> : <Navigate to="/" />} />
     </Route>
     <Route path="*" element={<Navigate to="/" />} />

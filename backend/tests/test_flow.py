@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 import zipfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 import httpx
@@ -161,7 +161,7 @@ class FlowTest(unittest.TestCase):
             'Authorization': 'Bearer ' + first_key.json()['key'],
         }).status_code, 401)
 
-    def test_user_concurrency_limit(self):
+    def test_user_has_no_concurrency_limit(self):
         self.login('admin@example.com', 'long-test-password')
         upstream = self.admin_post('/api/admin/upstreams', {
             'name': 'test', 'base_url': 'http://127.0.0.1:9999/v1', 'api_key': 'upstream-secret',
@@ -184,18 +184,146 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(first.status_code, 202, first.text)
         second = self.client.post('/v1/images/generations', json=payload,
                                   headers={**headers, 'Idempotency-Key': 'second'})
-        self.assertEqual(second.status_code, 429, second.text)
+        self.assertEqual(second.status_code, 202, second.text)
         self.assertEqual(self.client.delete(f'/api/admin/users/{created["id"]}',
                                             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 409)
         self.assertEqual(self.admin_patch(f'/api/admin/users/{created["id"]}', {'is_active': False}).status_code, 200)
         with patch('app.worker.OpenAIImageAdapter.generate', return_value={'data': [{'url': 'https://example.com/image.png'}]}):
             self.assertTrue(run_once())
+            self.assertTrue(run_once())
         with db.SessionLocal() as session:
             settled = session.get(User, created['id'])
-            self.assertEqual(settled.balance, 9)
+            self.assertEqual(settled.balance, 8)
             self.assertEqual(settled.reserved, 0)
         self.assertEqual(self.client.delete(f'/api/admin/users/{created["id"]}',
                                             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 200)
+
+    def test_group_scoping_failover_and_billing_filters(self):
+        self.login('admin@example.com', 'long-test-password')
+        first = self.admin_post('/api/admin/upstreams', {
+            'name': 'primary', 'base_url': 'http://127.0.0.1:9999/v1',
+            'api_key': 'one', 'max_concurrency': 1,
+        }).json()
+        second = self.admin_post('/api/admin/upstreams', {
+            'name': 'backup', 'base_url': 'http://127.0.0.1:9999/v1',
+            'api_key': 'two', 'max_concurrency': 1,
+        }).json()
+        group = self.admin_post('/api/admin/groups', {
+            'name': 'team', 'account_ids': [first['id'], second['id']],
+            'max_concurrency': 2,
+        }).json()
+        mapped = self.admin_post('/api/admin/mappings', {
+            'group_id': group['id'], 'public_name': 'art', 'price': '1.0000',
+            'routes': [{'account_id': first['id'], 'upstream_model': 'image-a'},
+                       {'account_id': second['id'], 'upstream_model': 'image-b'}],
+        })
+        self.assertEqual(mapped.status_code, 200, mapped.text)
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'art', 'upstream_account_id': first['id'],
+            'upstream_model': 'other', 'price': '2.0000',
+        }).status_code, 200)
+        self.assertEqual(len(self.client.get('/api/admin/mappings', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()), 2)
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': admin_id, 'amount': '10', 'reference': 'group-test',
+        }).status_code, 200)
+        group_key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {
+            'name': 'team-key', 'group_id': group['id'],
+        }).json()['key']
+        default_key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {
+            'name': 'default-key', 'group_id': 1,
+        }).json()['key']
+        self.assertEqual(self.client.get('/v1/models', headers={
+            'Authorization': 'Bearer ' + default_key}).json()['data'][0]['id'], 'art')
+        self.assertEqual(self.client.get('/v1/models', headers={
+            'Authorization': 'Bearer ' + group_key}).json()['data'][0]['id'], 'art')
+        first_job = self.client.post('/v1/images/generations', json={
+            'model': 'art', 'prompt': 'First'}, headers={
+            'Authorization': 'Bearer ' + group_key, 'Idempotency-Key': 'group-first'})
+        self.assertEqual(first_job.status_code, 202, first_job.text)
+        self.assertEqual(self.client.get('/v1/jobs/' + first_job.json()['id'], headers={
+            'Authorization': 'Bearer ' + default_key}).status_code, 404)
+        self.assertEqual(self.client.post('/v1/images/generations', json={
+            'model': 'art', 'prompt': 'First'}, headers={
+            'Authorization': 'Bearer ' + default_key, 'Idempotency-Key': 'group-first'}).status_code, 409)
+        second_job = self.client.post('/v1/images/generations', json={
+            'model': 'art', 'prompt': 'Second'}, headers={
+            'Authorization': 'Bearer ' + group_key, 'Idempotency-Key': 'group-second'})
+        self.assertEqual(second_job.status_code, 202, second_job.text)
+        third_job = self.client.post('/v1/images/generations', json={
+            'model': 'art', 'prompt': 'Third'}, headers={
+            'Authorization': 'Bearer ' + group_key, 'Idempotency-Key': 'group-third'})
+        self.assertEqual(third_job.status_code, 202, third_job.text)
+        with db.SessionLocal() as session:
+            claimed = claim_job(session, 180)
+            self.assertEqual(claimed.upstream_account_id, first['id'])
+            alternate = claim_job(session, 180)
+            self.assertEqual(alternate.upstream_account_id, second['id'])
+            self.assertIsNone(claim_job(session, 180))
+        with db.SessionLocal() as session:
+            with session.begin():
+                for job in session.scalars(select(GenerationJob)):
+                    job.status = JobStatus.QUEUED
+        response = httpx.Response(429, request=httpx.Request('POST', 'http://127.0.0.1:9999/v1/images/generations'))
+        failure = httpx.HTTPStatusError('busy', request=response.request, response=response)
+        calls = []
+        def generate(adapter, job):
+            calls.append((adapter.account.id, job.upstream_model))
+            if adapter.account.id == first['id']:
+                raise failure
+            return {'data': [{'url': 'https://example.com/image.png'}]}
+        with patch('app.worker.OpenAIImageAdapter.generate', generate):
+            self.assertTrue(run_once(first_job.json()['id']))
+        self.assertEqual(calls, [(first['id'], 'image-a'), (second['id'], 'image-b')])
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        billing = self.client.get(f'/api/billing?model=art&date_from={today}').json()
+        self.assertEqual(billing['usage_total'], 1)
+        self.assertEqual(billing['usage'][0]['amount'], '1.0000')
+        usage_id = billing['usage'][0]['id']
+        self.assertEqual(self.admin_post('/api/billing/delete', {'usage_ids': [usage_id]}).status_code, 200)
+        self.assertEqual(self.client.get('/api/billing').json()['usage_total'], 0)
+        self.assertEqual(self.client.get('/api/billing').json()['balance'], '9.0000')
+        self.assertEqual(self.admin_patch(f'/api/admin/upstreams/{first["id"]}', {
+            'max_concurrency': 1, 'enabled': False,
+        }).status_code, 200)
+        fallback = self.client.post('/v1/images/generations', json={
+            'model': 'art', 'prompt': 'Backup only'}, headers={
+            'Authorization': 'Bearer ' + group_key, 'Idempotency-Key': 'backup-only'})
+        self.assertEqual(fallback.status_code, 202, fallback.text)
+        with db.SessionLocal() as session:
+            self.assertEqual(session.get(GenerationJob, fallback.json()['id']).upstream_account_id,
+                             second['id'])
+
+    def test_novelai_overlap_requires_reconciliation(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'novelai-overlap', 'provider': 'novelai',
+            'base_url': 'http://127.0.0.1:9999', 'api_key': 'secret',
+            'max_concurrency': 2,
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'anime', 'upstream_account_id': account['id'],
+            'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
+        }).status_code, 200)
+        user_id = self.client.get('/api/auth/me').json()['id']
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': user_id, 'amount': '100', 'reference': 'overlap',
+        }).status_code, 200)
+        key = self.admin_post(f'/api/admin/users/{user_id}/keys', {'name': 'overlap'}).json()['key']
+        ids = []
+        for index in range(2):
+            response = self.client.post('/v1/images/generations', json={
+                'model': 'anime', 'prompt': f'Image {index}',
+            }, headers={'Authorization': 'Bearer ' + key,
+                        'Idempotency-Key': f'overlap-{index}'})
+            self.assertEqual(response.status_code, 202, response.text)
+            ids.append(response.json()['id'])
+        with db.SessionLocal() as session:
+            self.assertEqual(claim_job(session, 180).id, ids[0])
+            self.assertEqual(claim_job(session, 180).id, ids[1])
+            session.expire_all()
+            self.assertTrue(all(session.get(GenerationJob, job_id).billing_overlap for job_id in ids))
 
     def test_novelai_generation_uses_actual_anlas_and_serves_image(self):
         self.login('admin@example.com', 'long-test-password')
