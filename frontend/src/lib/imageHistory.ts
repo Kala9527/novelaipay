@@ -1,6 +1,7 @@
 import type { Job } from '../types'
 
 export type CachedImage = { id: string; userId: number; model: string; prompt: string; createdAt: string; blob: Blob }
+type ImageRecord = CachedImage | { id: string; userId: number; deleted: true }
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -16,8 +17,8 @@ export async function recentImages(userId: number): Promise<CachedImage[]> {
   try {
     return await new Promise((resolve, reject) => {
       const request = db.transaction('images').objectStore('images').getAll()
-      request.onsuccess = () => resolve((request.result as CachedImage[])
-        .filter(image => image.userId === userId)
+      request.onsuccess = () => resolve((request.result as ImageRecord[])
+        .filter((image): image is CachedImage => image.userId === userId && 'blob' in image)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5))
       request.onerror = () => reject(request.error)
     })
@@ -29,6 +30,13 @@ export async function saveImage(userId: number, job: Job): Promise<void> {
   if (!imageUrl) return
   const existing = await recentImages(userId)
   if (existing.some(image => image.id === job.id)) return
+  const checkDb = await openDatabase()
+  const stored = await new Promise<ImageRecord | undefined>((resolve, reject) => {
+    const request = checkDb.transaction('images').objectStore('images').get(job.id)
+    request.onsuccess = () => resolve(request.result as ImageRecord | undefined)
+    request.onerror = () => reject(request.error)
+  }).finally(() => checkDb.close())
+  if (stored?.userId === userId) return
   const response = await fetch(imageUrl, { credentials: 'same-origin' })
   if (!response.ok) throw new Error('图片下载失败')
   const blob = await response.blob()
@@ -41,6 +49,18 @@ export async function saveImage(userId: number, job: Job): Promise<void> {
       store.put({ id: job.id, userId, model: job.model, prompt: job.prompt, createdAt: job.created_at, blob })
       for (const old of [...existing, { id: job.id, createdAt: job.created_at }]
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(5)) store.delete(old.id)
+      transaction.oncomplete = () => resolve()
+      transaction.onerror = () => reject(transaction.error)
+    })
+  } finally { db.close() }
+}
+
+export async function deleteImage(userId: number, id: string): Promise<void> {
+  const db = await openDatabase()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('images', 'readwrite')
+      transaction.objectStore('images').put({ id, userId, deleted: true })
       transaction.oncomplete = () => resolve()
       transaction.onerror = () => reject(transaction.error)
     })

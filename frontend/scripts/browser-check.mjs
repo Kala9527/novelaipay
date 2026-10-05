@@ -31,7 +31,7 @@ const command = (method, params = {}) => new Promise((resolve, reject) => {
 })
 const evaluate = async expression => {
   const result = await command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text)
+  if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text)
   return result.result.value
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -59,8 +59,63 @@ for (const [path, name] of [['keys', 'keys-desktop.png'], ['jobs', 'usage-deskto
   await pause(1200)
   await screenshot(name)
 }
+await evaluate(`[...document.querySelectorAll('.tab')].find(button => button.textContent === '分组').click()`)
+await pause(250)
+const groupsTab = await evaluate(`(() => {
+  const scope = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('可见范围'))?.querySelector('select')
+  const defaultPublic = scope?.value === 'public'
+  scope.value = 'private'
+  scope.dispatchEvent(new Event('change', { bubbles: true }))
+  return defaultPublic
+})()`)
+await pause(250)
+const privateControls = await evaluate(`({
+  recipients:document.querySelectorAll('.form-grid .wide input[type="checkbox"]').length,
+  saveDisabled:[...document.querySelectorAll('.form-grid button')].find(button => button.textContent.includes('保存分组'))?.disabled
+})`)
+if (!groupsTab || !privateControls.recipients || !privateControls.saveDisabled) throw new Error(`Private group controls: ${JSON.stringify(privateControls)}`)
+await evaluate(`[...document.querySelectorAll('.tab')].find(button => button.textContent === '模型与定价').click()`)
+await pause(250)
+const backupLimit = await evaluate(`(() => {
+  const group = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('分组'))?.querySelector('select')
+  group.value = group.options[1]?.value || ''
+  group.dispatchEvent(new Event('change', { bubbles: true }))
+  return Boolean(group.value)
+})()`)
+await pause(250)
+const routeControl = await evaluate(`(() => {
+  const primary = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('首选上游账户'))?.querySelector('select')
+  primary.value = primary.options[1]?.value || ''
+  primary.dispatchEvent(new Event('change', { bubbles: true }))
+  return primary.options.length
+})()`)
+await pause(250)
+const backupButton = await evaluate(`(() => {
+  const button = [...document.querySelectorAll('button')].find(button => button.textContent.includes('添加备用账号'))
+  const before = button.disabled
+  return { before }
+})()`)
+if (!backupLimit || routeControl < 3 || backupButton.before) throw new Error(`Backup route controls: ${JSON.stringify({ backupLimit, routeControl, backupButton })}`)
+for (let index = 0; index < routeControl - 2; index++) {
+  await evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('添加备用账号')).click()`)
+  await pause(150)
+}
+const backupFull = await evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('添加备用账号')).disabled`)
+if (!backupFull) throw new Error('Backup route button remained enabled at the account limit')
 await command('Page.navigate', { url: 'http://127.0.0.1:8009/workshop' })
 await pause(1200)
+const historyControls = await evaluate(`(() => {
+  const row = document.querySelector('.studio-history-item')
+  const controls = ['查看大图', '下载图片', '删除记录'].every(title => row?.querySelector('[title="' + title + '"]'))
+  row?.querySelector('button[title="查看大图"]')?.click()
+  return { controls }
+})()`)
+await pause(250)
+const lightbox = await evaluate(`Boolean(document.querySelector('.studio-lightbox'))`)
+if (!historyControls.controls || !lightbox) throw new Error(`Image history controls: ${JSON.stringify({ historyControls, lightbox })}`)
+await screenshot('workshop-large-image.png')
+await evaluate(`document.querySelector('.studio-lightbox button[title="关闭"]').click()`)
+console.log('new controls', { privateControls, backupFull, historyControls, lightbox })
 await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
 await pause(1000)
 await screenshot('workshop-mobile.png')

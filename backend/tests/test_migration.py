@@ -42,6 +42,7 @@ class GroupMigrationTest(unittest.TestCase):
                 self.assertEqual(connection.execute('SELECT group_id FROM api_keys WHERE id = 3').fetchone(), (1,))
                 self.assertEqual(connection.execute('SELECT group_id FROM model_mappings WHERE id = 5').fetchone(), (1,))
                 self.assertEqual(connection.execute('SELECT account_id FROM model_routes WHERE model_mapping_id = 5').fetchone(), (7,))
-                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0010',))
+                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0011',))
+                self.assertEqual(connection.execute('SELECT is_private FROM upstream_groups WHERE id = 1').fetchone(), (0,))
                 connection.execute("INSERT INTO upstream_groups (id, name, max_concurrency, enabled) VALUES (2, 'second', 10, 1)")
                 connection.execute("INSERT INTO model_mappings (id, public_name, upstream_model, upstream_account_id, enabled, max_concurrency, revision, group_id) VALUES (6, 'art', 'image', 7, 1, 2, 1, 2)")

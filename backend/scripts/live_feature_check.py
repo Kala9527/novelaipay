@@ -44,7 +44,8 @@ def image_inputs() -> tuple[str, str]:
 
 def main() -> None:
     config = yaml.safe_load((ROOT / 'config.yaml').read_text(encoding='utf-8'))
-    original, mask = image_inputs()
+    selected = set(filter(None, os.environ.get('LIVE_CASES', '').split(',')))
+    original, mask = image_inputs() if not selected or selected - {'text'} else ('', '')
     with httpx.Client(base_url=BASE, timeout=30) as client:
         login = client.post('/api/auth/login', json={
             'email': config['admin']['email'], 'password': config['admin']['password'],
@@ -88,7 +89,6 @@ def main() -> None:
             ('advanced', {'quality_toggle': True, 'smea': True, 'smea_dyn': True,
                           'dynamic_thresholding': True, 'cfg_rescale': 0.15, 'seed': 42}),
         ]
-        selected = set(filter(None, os.environ.get('LIVE_CASES', '').split(',')))
         for name, feature in cases:
             if selected and name not in selected:
                 continue

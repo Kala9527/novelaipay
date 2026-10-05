@@ -5,7 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import ApiKey, User
+from ..group_access import can_use_group
+from ..models import ApiKey, UpstreamGroup, User
 from ..security import decode_session, hash_api_key
 
 
@@ -44,6 +45,8 @@ def downstream_key(
         raise HTTPException(401, 'API key required')
     raw = authorization[7:]
     key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(raw)))
-    if key is None or key.revoked_at or not key.user.is_active or key.user.deleted_at:
+    if key is None or key.revoked_at or not key.user.is_active or key.user.deleted_at or not can_use_group(
+        db, db.get(UpstreamGroup, key.group_id), key.user_id
+    ):
         raise HTTPException(401, 'Invalid API key')
     return key

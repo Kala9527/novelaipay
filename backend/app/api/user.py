@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..group_access import can_use_group
 from ..models import ApiKey, GenerationJob, ModelMapping, PriceVersion, UpstreamAccount, UpstreamGroup, UsageRecord, User, WalletLedger, utcnow
 from ..security import decrypt_upstream_key, encrypt_upstream_key, new_api_key
 from ..upstream import IMAGE_DIR
@@ -49,12 +50,14 @@ def list_keys(user: User = Depends(current_user), db: Session = Depends(get_db))
 
 @router.post('/keys')
 def create_key(payload: KeyCreate, user: User = Depends(csrf_user), db: Session = Depends(get_db)) -> dict:
-    group = db.get(UpstreamGroup, payload.group_id) if payload.group_id else db.scalar(select(UpstreamGroup).order_by(UpstreamGroup.id))
+    group = db.get(UpstreamGroup, payload.group_id) if payload.group_id else db.scalar(select(
+        UpstreamGroup).where(UpstreamGroup.is_private.is_(False), UpstreamGroup.enabled.is_(True))
+        .order_by(UpstreamGroup.id))
     if group is None and payload.group_id is None:
         group = UpstreamGroup(name='默认分组')
         db.add(group)
         db.flush()
-    if group is None or not group.enabled:
+    if not can_use_group(db, group, user.id):
         raise HTTPException(404, 'Group unavailable')
     raw, prefix, key_hash = new_api_key()
     key = ApiKey(user_id=user.id, group_id=group.id, name=payload.name, prefix=prefix, key_hash=key_hash,
@@ -85,13 +88,14 @@ def revoke_key(key_id: int, user: User = Depends(csrf_user), db: Session = Depen
 
 
 @router.get('/groups')
-def available_groups(_: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+def available_groups(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
     return [{'id': group.id, 'name': group.name} for group in db.scalars(select(UpstreamGroup).where(
-        UpstreamGroup.enabled.is_(True)).order_by(UpstreamGroup.id))]
+        UpstreamGroup.enabled.is_(True)).order_by(UpstreamGroup.id))
+        if can_use_group(db, group, user.id)]
 
 
 @router.get('/models')
-def list_models(_: User = Depends(current_user), group_id: int | None = None,
+def list_models(user: User = Depends(current_user), group_id: int | None = None,
                 db: Session = Depends(get_db)) -> list[dict]:
     mappings = db.scalars(select(ModelMapping).where(ModelMapping.enabled.is_(True)).order_by(
         ModelMapping.public_name,
@@ -99,6 +103,8 @@ def list_models(_: User = Depends(current_user), group_id: int | None = None,
     result = []
     for mapping in mappings:
         if group_id is not None and mapping.group_id != group_id:
+            continue
+        if not can_use_group(db, db.get(UpstreamGroup, mapping.group_id), user.id):
             continue
         price = db.scalar(select(PriceVersion).where(
             PriceVersion.model_mapping_id == mapping.id,

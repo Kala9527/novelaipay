@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..config import get_settings
-from ..models import ApiKey, GenerationJob, GroupAccount, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, User, utcnow
+from ..group_access import can_use_group
+from ..models import ApiKey, GenerationJob, GroupAccount, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, User, utcnow
 from ..security import decrypt_upstream_key, encrypt_upstream_key, hash_password, new_api_key
 from ..services import credit_wallet, resolve_uncertain
 from ..upstream import UpstreamUncertain, store_remote_image
@@ -21,7 +22,7 @@ router = APIRouter(prefix='/api/admin', tags=['admin'])
 
 
 def default_group(db: Session) -> UpstreamGroup:
-    group = db.scalar(select(UpstreamGroup).order_by(UpstreamGroup.id))
+    group = db.scalar(select(UpstreamGroup).where(UpstreamGroup.is_private.is_(False)).order_by(UpstreamGroup.id))
     if group is None:
         group = UpstreamGroup(name='默认分组')
         db.add(group)
@@ -44,10 +45,13 @@ class UpstreamUpdate(BaseModel):
 
 
 class GroupUpsert(BaseModel):
+    id: int | None = None
     name: str = Field(min_length=1, max_length=80)
     max_concurrency: int = Field(default=10, ge=1, le=1000)
     account_ids: list[int] = Field(default_factory=list)
     enabled: bool = True
+    is_private: bool = False
+    member_ids: list[int] = Field(default_factory=list)
 
 
 class RouteInput(BaseModel):
@@ -191,7 +195,7 @@ def issue_user_key(user_id: int, payload: KeyIssue, _: User = Depends(admin_user
     if row is None or row.deleted_at or not row.is_active:
         raise HTTPException(404, 'Active user not found')
     group = db.get(UpstreamGroup, payload.group_id) if payload.group_id else default_group(db)
-    if group is None or not group.enabled:
+    if not can_use_group(db, group, row.id):
         raise HTTPException(404, 'Group unavailable')
     raw, prefix, digest = new_api_key()
     key = ApiKey(user_id=row.id, group_id=group.id, name=payload.name, prefix=prefix, key_hash=digest,
@@ -299,14 +303,36 @@ def upstream_models(account_id: int, _: User = Depends(admin_user), db: Session 
 @router.get('/groups')
 def groups(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
     return [{'id': row.id, 'name': row.name, 'max_concurrency': row.max_concurrency,
-             'enabled': row.enabled, 'account_ids': list(db.scalars(select(GroupAccount.account_id).where(
-                 GroupAccount.group_id == row.id).order_by(GroupAccount.id)))}
+             'enabled': row.enabled, 'is_private': row.is_private,
+             'account_ids': list(db.scalars(select(GroupAccount.account_id).where(
+                 GroupAccount.group_id == row.id).order_by(GroupAccount.id))),
+             'member_ids': list(db.scalars(select(GroupMember.user_id).where(
+                 GroupMember.group_id == row.id).order_by(GroupMember.user_id)))}
             for row in db.scalars(select(UpstreamGroup).order_by(UpstreamGroup.id))]
+
+
+@router.get('/group-recipients')
+def group_recipients(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+    return [{'id': row.id, 'name': row.display_name, 'email': row.email,
+             'is_admin': row.is_admin} for row in db.scalars(select(User).where(
+                 User.is_active.is_(True), User.deleted_at.is_(None)).order_by(User.id))]
 
 
 @router.post('/groups')
 def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
-    row = db.scalar(select(UpstreamGroup).where(UpstreamGroup.name == payload.name))
+    members = set(payload.member_ids) if payload.is_private else set()
+    if payload.is_private and not members:
+        raise HTTPException(422, 'Private group needs at least one member')
+    valid_members = set(db.scalars(select(User.id).where(
+        User.id.in_(members), User.is_active.is_(True), User.deleted_at.is_(None))))
+    if members != valid_members:
+        raise HTTPException(422, 'Group members must be active registered users')
+    row = db.get(UpstreamGroup, payload.id) if payload.id else None
+    if payload.id and row is None:
+        raise HTTPException(404, 'Group not found')
+    duplicate = db.scalar(select(UpstreamGroup).where(UpstreamGroup.name == payload.name))
+    if duplicate and duplicate.id != (row.id if row else None):
+        raise HTTPException(409, 'Group name exists')
     if row is None:
         row = UpstreamGroup(name=payload.name)
         db.add(row)
@@ -316,6 +342,12 @@ def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session 
         raise HTTPException(404, 'Upstream account not found')
     row.max_concurrency = payload.max_concurrency
     row.enabled = payload.enabled
+    row.is_private = payload.is_private
+    for member in db.scalars(select(GroupMember).where(GroupMember.group_id == row.id)).all():
+        db.delete(member)
+    db.flush()
+    for user_id in members:
+        db.add(GroupMember(group_id=row.id, user_id=user_id))
     selected = {account.id for account in accounts}
     existing = db.scalars(select(GroupAccount).where(GroupAccount.group_id == row.id)).all()
     for member in existing:

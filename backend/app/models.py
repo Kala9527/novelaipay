@@ -67,6 +67,15 @@ class UpstreamGroup(Base):
     name: Mapped[str] = mapped_column(String(80), unique=True)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=10)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class GroupMember(Base):
+    __tablename__ = 'group_members'
+    __table_args__ = (UniqueConstraint('group_id', 'user_id', name='uq_group_member'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey('upstream_groups.id'), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
 
 
 class GroupAccount(Base):

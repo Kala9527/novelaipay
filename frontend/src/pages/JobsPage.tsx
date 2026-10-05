@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { WandSparkles, Plus, Trash2, Download, Image as ImageIcon, Sparkles } from 'lucide-react'
+import { WandSparkles, Plus, Trash2, Download, Image as ImageIcon, Sparkles, Expand, X } from 'lucide-react'
 import { api, formatDate, formatMoney } from '../lib/api'
-import { recentImages, saveImage, type CachedImage } from '../lib/imageHistory'
+import { deleteImage, recentImages, saveImage, type CachedImage } from '../lib/imageHistory'
 import type { Job, Key, Model } from '../types'
 import { Notice, Status } from '../components/UI'
 
@@ -11,6 +11,7 @@ export function JobsPage({ userId }: { userId: number }) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [selected, setSelected] = useState<Job | null>(null)
   const [images, setImages] = useState<(CachedImage & { url: string })[]>([])
+  const [largeImageId, setLargeImageId] = useState<string | null>(null)
   const imageIds = useRef('')
   const [error, setError] = useState('')
   const [models, setModels] = useState<Model[]>([])
@@ -48,16 +49,32 @@ export function JobsPage({ userId }: { userId: number }) {
     imageIds.current = ids
     setImages(cached.map(image => ({ ...image, url: URL.createObjectURL(image.blob) })))
   }
+  async function removeImage(id: string) {
+    if (!window.confirm('删除这条本地图片记录？')) return
+    try {
+      await deleteImage(userId, id)
+      if (largeImageId === id) setLargeImageId(null)
+      if (selected?.id === id) setSelected(null)
+      await refreshImages()
+    } catch (e) { setError((e as Error).message) }
+  }
   useEffect(() => () => { images.forEach(image => URL.revokeObjectURL(image.url)) }, [images])
   const load = () => api<Job[]>('/api/jobs').then(async rows => {
     setJobs(rows)
     setSelected(current => rows.find(j => j.id === current?.id) || null)
-    for (const job of rows.filter(row => row.status === 'succeeded').slice(0, 5)) {
+    for (const job of rows.filter(row => row.status === 'succeeded')) {
+      if ((await recentImages(userId)).length >= 5) break
       if (job.result?.data?.length) await saveImage(userId, job)
     }
     await refreshImages()
   }).catch(e => setError(e.message))
   useEffect(() => { load(); const id = window.setInterval(load, 10000); return () => clearInterval(id) }, [userId])
+  useEffect(() => {
+    if (!largeImageId) return
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setLargeImageId(null) }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [largeImageId])
   useEffect(() => { api<Model[]>('/api/models').then(rows => { setModels(rows); if (rows.length) setForm(current => ({ ...current, model: current.model || rows[0].name })) }).catch(e => setError(e.message)) }, [])
   useEffect(() => { api<Key[]>('/api/keys').then(rows => { setKeys(rows); if (rows.length) setKeyId(String(rows[0].id)) }).catch(e => setError(e.message)) }, [])
   const availableModels = models.filter(row => !keyId || row.group_id === keys.find(key => key.id === Number(keyId))?.group_id)
@@ -94,6 +111,8 @@ export function JobsPage({ userId }: { userId: number }) {
     finally { setBusy(false) }
   }
   const model = availableModels.find(row => row.name === form.model)
+  const largeImage = images.find(image => image.id === largeImageId)
+  const imageFilename = (image: CachedImage) => `${image.id}.${image.blob.type === 'image/jpeg' ? 'jpg' : 'png'}`
   return <div className="studio-page">
     <header className="studio-header"><div><span className="studio-eyebrow"><Sparkles size={13} /> IMAGE STUDIO</span><h1>生图工作台</h1></div><div className="studio-header-meta">{model && <span>{model.name}</span>}<span>{model ? `${formatMoney(model.price)} / ${model.billing_mode === 'anlas' ? 'Anlas' : '次'}${Number(model.extra_amount) ? ` + ${formatMoney(model.extra_amount)} / 次` : ''}` : '选择模型'}</span></div></header>
     {error && <Notice text={error} error />}
@@ -137,7 +156,8 @@ export function JobsPage({ userId }: { userId: number }) {
       <button className="button primary studio-generate" disabled={busy || pendingReads > 0 || !model}><WandSparkles size={16} />{busy ? '提交中' : pendingReads > 0 ? '读取图片中' : '生成图片'}</button>
     </form>}
     <section className="studio-canvas"><div className="studio-pane-title"><span>预览</span>{selected && <Status value={selected.status} />}</div>{selected?.result?.data?.[0]?.url ? <div className="studio-result"><img src={selected.result.data[0].url} alt={selected.prompt} /><a className="button secondary" href={selected.result.data[0].url} download={`${selected.id}.png`}><Download size={16} />下载图片</a></div> : <div className="studio-empty"><ImageIcon size={48} strokeWidth={1.3} /><strong>{selected?.status === 'running' || selected?.status === 'queued' ? '正在生成图片' : '暂无生成结果'}</strong>{selected?.error && <span>{selected.error}</span>}</div>}{selected && <div className="studio-result-meta"><span>{selected.model}</span><span>{selected.size}</span><span>{formatMoney(selected.amount)}</span></div>}</section>
-    <aside className="studio-history"><div className="studio-pane-title"><span>最近生成</span><small>{images.length} / 5</small></div>{images.length ? <div className="studio-history-list">{images.map(image => <button type="button" className="studio-history-item" key={image.id} onClick={() => setSelected(jobs.find(job => job.id === image.id) || null)}><img src={image.url} alt="" /><span><strong>{image.model}</strong><small>{formatDate(image.createdAt)}</small></span></button>)}</div> : <div className="studio-history-empty"><ImageIcon size={26} /><span>{jobs.some(job => ['queued', 'running'].includes(job.status)) ? '图片生成中' : '暂无本地图片'}</span></div>}</aside>
+    <aside className="studio-history"><div className="studio-pane-title"><span>最近生成</span><small>{images.length} / 5</small></div>{images.length ? <div className="studio-history-list">{images.map(image => <div className="studio-history-item" key={image.id}><button type="button" className="studio-history-preview" onClick={() => { setSelected(jobs.find(job => job.id === image.id) || null); setLargeImageId(image.id) }} title="查看大图"><img src={image.url} alt={image.prompt} /><span><strong>{image.model}</strong><small>{formatDate(image.createdAt)}</small></span></button><div className="studio-history-actions"><button type="button" className="icon-button" title="查看大图" aria-label="查看大图" onClick={() => setLargeImageId(image.id)}><Expand size={15} /></button><a className="icon-button" href={image.url} download={imageFilename(image)} title="下载图片" aria-label="下载图片"><Download size={15} /></a><button type="button" className="icon-button danger" title="删除记录" aria-label="删除记录" onClick={() => removeImage(image.id)}><Trash2 size={15} /></button></div></div>)}</div> : <div className="studio-history-empty"><ImageIcon size={26} /><span>{jobs.some(job => ['queued', 'running'].includes(job.status)) ? '图片生成中' : '暂无本地图片'}</span></div>}</aside>
     </div>
+    {largeImage && <div className="studio-lightbox" role="dialog" aria-modal="true" aria-label="查看大图" onClick={() => setLargeImageId(null)}><div className="studio-lightbox-content" onClick={event => event.stopPropagation()}><div className="studio-lightbox-header"><strong>{largeImage.model}</strong><div className="row-actions"><a className="icon-button" href={largeImage.url} download={imageFilename(largeImage)} title="下载图片" aria-label="下载图片"><Download size={18} /></a><button type="button" className="icon-button" title="关闭" aria-label="关闭" onClick={() => setLargeImageId(null)}><X size={18} /></button></div></div><img src={largeImage.url} alt={largeImage.prompt} /></div></div>}
   </div>
 }

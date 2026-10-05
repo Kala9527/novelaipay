@@ -198,6 +198,82 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(self.client.delete(f'/api/admin/users/{created["id"]}',
                                             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 200)
 
+    def test_private_group_membership_controls_keys_models_and_existing_keys(self):
+        admin = self.login('admin@example.com', 'long-test-password')
+        first = self.admin_post('/api/admin/users', {
+            'name': 'Allowed', 'email': 'allowed@example.com', 'password': 'allowed-password-123',
+        }).json()
+        other = self.admin_post('/api/admin/users', {
+            'name': 'Other', 'email': 'other@example.com', 'password': 'other-password-123',
+        }).json()
+        recipients = self.client.get('/api/admin/group-recipients', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()
+        self.assertEqual({row['id'] for row in recipients}, {admin['id'], first['id'], other['id']})
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'private-upstream', 'base_url': 'http://127.0.0.1:9999/v1',
+            'api_key': 'secret',
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/groups', {
+            'name': 'invalid', 'is_private': True, 'member_ids': [999999],
+        }).status_code, 422)
+        group = self.admin_post('/api/admin/groups', {
+            'name': 'private', 'is_private': True, 'member_ids': [first['id'], admin['id']],
+            'account_ids': [],
+        }).json()
+        saved_group = next(row for row in self.client.get('/api/admin/groups', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json() if row['id'] == group['id'])
+        self.assertTrue(saved_group['is_private'])
+        self.assertEqual(set(saved_group['member_ids']), {first['id'], admin['id']})
+        self.assertEqual(saved_group['account_ids'], [])
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'group_id': group['id'], 'public_name': 'private-art', 'price': '1.0000',
+            'routes': [{'account_id': account['id'], 'upstream_model': 'image'}],
+        }).status_code, 422)
+        self.assertEqual(self.admin_post('/api/admin/groups', {
+            'id': group['id'], 'name': 'private', 'is_private': True,
+            'member_ids': [first['id'], admin['id']], 'account_ids': [account['id']],
+        }).status_code, 200)
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'group_id': group['id'], 'public_name': 'private-art', 'price': '1.0000',
+            'routes': [{'account_id': account['id'], 'upstream_model': 'image'}],
+        }).status_code, 200)
+        self.assertEqual(self.admin_post(f'/api/admin/users/{other["id"]}/keys', {
+            'name': 'forbidden', 'group_id': group['id'],
+        }).status_code, 404)
+        self.client.cookies.clear()
+        self.login('other@example.com', 'other-password-123')
+        self.assertNotIn(group['id'], [item['id'] for item in self.client.get('/api/groups').json()])
+        self.assertNotIn('private-art', [item['name'] for item in self.client.get('/api/models').json()])
+        self.assertEqual(self.client.post('/api/keys', json={
+            'name': 'forbidden', 'group_id': group['id'],
+        }, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 404)
+        self.client.cookies.clear()
+        self.login('allowed@example.com', 'allowed-password-123')
+        self.assertIn(group['id'], [item['id'] for item in self.client.get('/api/groups').json()])
+        self.assertIn('private-art', [item['name'] for item in self.client.get('/api/models').json()])
+        key_response = self.client.post('/api/keys', json={
+            'name': 'allowed', 'group_id': group['id'],
+        }, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertEqual(key_response.status_code, 200, key_response.text)
+        key = key_response.json()['key']
+        self.assertEqual(self.client.get('/v1/models', headers={
+            'Authorization': 'Bearer ' + key,
+        }).status_code, 200)
+        self.client.cookies.clear()
+        self.login('admin@example.com', 'long-test-password')
+        self.assertEqual(self.admin_post('/api/admin/groups', {
+            'id': group['id'], 'name': 'private', 'is_private': True,
+            'member_ids': [admin['id']], 'account_ids': [account['id']],
+        }).status_code, 200)
+        self.assertEqual(self.client.get('/v1/models', headers={
+            'Authorization': 'Bearer ' + key,
+        }).status_code, 401)
+        self.assertEqual(self.client.post('/v1/images/generations', json={
+            'model': 'private-art', 'prompt': 'Denied',
+        }, headers={'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'revoked-access'}).status_code, 401)
+
     def test_group_scoping_failover_and_billing_filters(self):
         self.login('admin@example.com', 'long-test-password')
         first = self.admin_post('/api/admin/upstreams', {
