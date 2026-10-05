@@ -1,11 +1,11 @@
 export type User = { id: number; email: string; name: string; role: 'admin' | 'user'; is_admin: boolean; max_concurrency: number; balance: string; reserved: string }
 export type Key = { id: number; name: string; group_id: number | null; prefix: string; can_copy: boolean; created_at: string; revoked_at: string | null; key?: string }
-export type Group = { id: number; name: string; max_concurrency: number; enabled: boolean; is_private: boolean; account_ids: number[]; member_ids: number[] }
+export type Group = { id: number; name: string; max_concurrency: number; enabled: boolean; is_private: boolean; account_ids: number[]; member_ids: number[]; deleted_at: string | null }
 export type GroupRecipient = { id: number; name: string; email: string; is_admin: boolean }
 export type Model = { name: string; group_id: number; price: string; extra_amount: string; currency: string; billing_mode: 'fixed' | 'anlas'; supports_smea: boolean }
 export type Job = { id: string; model: string; prompt: string; size: string; parameters: Record<string, unknown>; anlas_cost: number | null; status: string; amount: string; result: { data: { url: string }[] } | null; error: string | null; created_at: string; finished_at: string | null }
 export type Ledger = { id: number; user_id: number; user_name: string; kind: string; amount: string; reference: string; created_at: string }
 export type Billing = { balance: string; reserved: string; ledger_total: number; usage_total: number; ledger: Ledger[]; usage: { id: number; job_id: string; user_id: number; user_name: string; model: string; amount: string; price_version_id: number; created_at: string }[] }
-export type Upstream = { id: number; name: string; base_url: string; provider: 'openai' | 'novelai'; opus_free: boolean; enabled: boolean; max_concurrency: number }
-export type Mapping = { id: number; group_id: number; public_name: string; upstream_account_id: number; upstream_model: string; routes: { account_id: number; upstream_model: string }[]; enabled: boolean; max_concurrency: number; revision: number; price: string | null; extra_amount: string; billing_mode: 'fixed' | 'anlas' | null }
+export type Upstream = { id: number; name: string; base_url: string; provider: 'openai' | 'novelai'; opus_free: boolean; enabled: boolean; max_concurrency: number; deleted_at: string | null }
+export type Mapping = { id: number; group_id: number; public_name: string; upstream_account_id: number; upstream_model: string; routes: { account_id: number; upstream_model: string }[]; enabled: boolean; max_concurrency: number; revision: number; price: string | null; extra_amount: string; billing_mode: 'fixed' | 'anlas' | null; deleted_at: string | null }
 export type AdminUser = User & { is_active: boolean; deleted_at: string | null }

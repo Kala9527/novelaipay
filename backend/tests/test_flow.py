@@ -274,6 +274,121 @@ class FlowTest(unittest.TestCase):
             'model': 'private-art', 'prompt': 'Denied',
         }, headers={'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'revoked-access'}).status_code, 401)
 
+    def test_admin_configuration_edit_archive_and_restore(self):
+        admin = self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'editable-account', 'base_url': 'http://127.0.0.1:9999/v1',
+            'api_key': 'initial-key',
+        }).json()
+        changed = self.admin_patch(f'/api/admin/upstreams/{account["id"]}', {
+            'name': 'renamed-account', 'base_url': 'https://example.com/v1',
+            'api_key': 'replacement-key', 'max_concurrency': 3, 'enabled': True,
+        })
+        self.assertEqual(changed.status_code, 200, changed.text)
+        accounts = self.client.get('/api/admin/upstreams', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()
+        self.assertEqual(next(row for row in accounts if row['id'] == account['id'])['name'], 'renamed-account')
+        group = self.admin_post('/api/admin/groups', {
+            'name': 'editable-group', 'account_ids': [account['id']],
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/groups', {
+            'id': group['id'], 'name': 'renamed-group', 'account_ids': [account['id']],
+        }).status_code, 200)
+        self.assertEqual(next(row for row in self.client.get('/api/admin/groups', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json() if row['id'] == group['id'])['name'], 'renamed-group')
+        key = self.admin_post(f'/api/admin/users/{admin["id"]}/keys', {
+            'name': 'group-key', 'group_id': group['id'],
+        }).json()['key']
+        mapping = self.admin_post('/api/admin/mappings', {
+            'group_id': group['id'], 'public_name': 'editable-model', 'price': '1',
+            'routes': [{'account_id': account['id'], 'upstream_model': 'image'}],
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'id': mapping['id'], 'group_id': group['id'], 'public_name': 'renamed-model',
+            'price': '2', 'routes': [{'account_id': account['id'], 'upstream_model': 'image-v2'}],
+        }).status_code, 200)
+        self.assertEqual(len(self.client.get('/api/admin/mappings', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()), 1)
+        delete = lambda path: self.client.delete(path, headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        })
+        self.assertEqual(delete(f'/api/admin/upstreams/{account["id"]}').status_code, 409)
+        self.assertEqual(delete(f'/api/admin/mappings/{mapping["id"]}').status_code, 200)
+        self.assertEqual(self.client.get('/api/admin/mappings', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json(), [])
+        archived = self.client.get('/api/admin/mappings?include_deleted=true', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()[0]
+        self.assertIsNotNone(archived['deleted_at'])
+        self.assertEqual(self.admin_post(f'/api/admin/mappings/{mapping["id"]}/restore', {}).status_code, 200)
+        self.assertFalse(self.client.get('/api/admin/mappings', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()[0]['enabled'])
+        self.assertEqual(delete(f'/api/admin/mappings/{mapping["id"]}').status_code, 200)
+        self.assertEqual(delete(f'/api/admin/groups/{group["id"]}').status_code, 200)
+        self.assertEqual(self.client.get('/v1/models', headers={
+            'Authorization': 'Bearer ' + key,
+        }).status_code, 401)
+        self.assertEqual(self.admin_post(f'/api/admin/groups/{group["id"]}/restore', {}).status_code, 200)
+        self.assertEqual(self.client.get('/v1/models', headers={
+            'Authorization': 'Bearer ' + key,
+        }).status_code, 401)
+        self.assertEqual(delete(f'/api/admin/upstreams/{account["id"]}').status_code, 200)
+        self.assertEqual(self.admin_post(f'/api/admin/mappings/{mapping["id"]}/restore', {}).status_code, 409)
+        self.assertEqual(self.admin_post(f'/api/admin/upstreams/{account["id"]}/restore', {}).status_code, 200)
+
+    def test_admin_can_edit_user_and_delete_uncertain_job(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'uncertain-account', 'base_url': 'http://127.0.0.1:9999/v1',
+            'api_key': 'secret',
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'uncertain-model', 'upstream_account_id': account['id'],
+            'upstream_model': 'image', 'price': '1',
+        }).status_code, 200)
+        user = self.admin_post('/api/admin/users', {
+            'name': 'Before', 'email': 'before@example.com', 'password': 'password-123456',
+        }).json()
+        self.assertEqual(self.admin_patch(f'/api/admin/users/{user["id"]}', {
+            'name': 'After', 'email': 'after@example.com', 'max_concurrency': 4,
+        }).status_code, 200)
+        searched = self.client.get('/api/admin/users?search=after@example.com&limit=1', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()
+        self.assertEqual([row['id'] for row in searched], [user['id']])
+        self.assertEqual(self.client.get('/api/admin/users?search=after@example.com&limit=1&offset=1', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json(), [])
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': user['id'], 'amount': '10', 'reference': 'uncertain-credit',
+        }).status_code, 200)
+        key = self.admin_post(f'/api/admin/users/{user["id"]}/keys', {
+            'name': 'key',
+        }).json()['key']
+        response = self.client.post('/v1/images/generations', json={
+            'model': 'uncertain-model', 'prompt': 'Test',
+        }, headers={'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'uncertain-delete'})
+        self.assertEqual(response.status_code, 202, response.text)
+        job_id = response.json()['id']
+        with db.SessionLocal.begin() as session:
+            session.get(GenerationJob, job_id).status = JobStatus.UNCERTAIN
+        deleted = self.client.delete(f'/api/admin/uncertain/{job_id}', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        })
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        with db.SessionLocal() as session:
+            job = session.get(GenerationJob, job_id)
+            owner = session.get(User, user['id'])
+            self.assertEqual(job.status, JobStatus.FAILED)
+            self.assertIsNotNone(job.hidden_at)
+            self.assertEqual(owner.reserved, 0)
+            self.assertEqual(owner.balance, 10)
+
     def test_group_scoping_failover_and_billing_filters(self):
         self.login('admin@example.com', 'long-test-password')
         first = self.admin_post('/api/admin/upstreams', {

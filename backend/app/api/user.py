@@ -54,6 +54,8 @@ def create_key(payload: KeyCreate, user: User = Depends(csrf_user), db: Session 
         UpstreamGroup).where(UpstreamGroup.is_private.is_(False), UpstreamGroup.enabled.is_(True))
         .order_by(UpstreamGroup.id))
     if group is None and payload.group_id is None:
+        if db.scalar(select(UpstreamGroup.id).limit(1)):
+            raise HTTPException(404, 'Group unavailable')
         group = UpstreamGroup(name='默认分组')
         db.add(group)
         db.flush()

@@ -2,9 +2,9 @@ from decimal import Decimal
 from urllib.parse import urlparse
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -21,9 +21,18 @@ from .user import job_view, key_view
 router = APIRouter(prefix='/api/admin', tags=['admin'])
 
 
+def has_unsettled_jobs(db: Session, *filters) -> bool:
+    return db.scalar(select(GenerationJob.id).where(
+        GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
+        *filters).limit(1)) is not None
+
+
 def default_group(db: Session) -> UpstreamGroup:
-    group = db.scalar(select(UpstreamGroup).where(UpstreamGroup.is_private.is_(False)).order_by(UpstreamGroup.id))
+    group = db.scalar(select(UpstreamGroup).where(UpstreamGroup.is_private.is_(False),
+        UpstreamGroup.deleted_at.is_(None)).order_by(UpstreamGroup.id))
     if group is None:
+        if db.scalar(select(UpstreamGroup.id).where(UpstreamGroup.name == '默认分组')):
+            raise HTTPException(409, 'Restore the default group first')
         group = UpstreamGroup(name='默认分组')
         db.add(group)
         db.flush()
@@ -37,11 +46,16 @@ class UpstreamCreate(BaseModel):
     provider: str = Field(default='openai', pattern='^(openai|novelai)$')
     opus_free: bool = False
     max_concurrency: int = Field(default=10, ge=1, le=1000)
+    enabled: bool = True
 
 
 class UpstreamUpdate(BaseModel):
-    max_concurrency: int = Field(ge=1, le=1000)
-    enabled: bool
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, min_length=1)
+    opus_free: bool | None = None
+    max_concurrency: int | None = Field(default=None, ge=1, le=1000)
+    enabled: bool | None = None
 
 
 class GroupUpsert(BaseModel):
@@ -60,6 +74,7 @@ class RouteInput(BaseModel):
 
 
 class MappingUpsert(BaseModel):
+    id: int | None = None
     public_name: str = Field(pattern=r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$')
     group_id: int | None = None
     upstream_account_id: int | None = None
@@ -85,6 +100,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    email: EmailStr | None = None
     max_concurrency: int | None = Field(default=None, ge=1, le=100)
     is_active: bool | None = None
 
@@ -102,17 +118,21 @@ class Resolution(BaseModel):
 
 
 @router.get('/users')
-def users(include_deleted: bool = False, _: User = Depends(admin_user),
-          db: Session = Depends(get_db)) -> list[dict]:
+def users(include_deleted: bool = False, search: str | None = None,
+          offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100),
+          _: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
     query = select(User)
     if not include_deleted:
         query = query.where(User.deleted_at.is_(None))
+    if search and search.strip():
+        term = f'%{search.strip()}%'
+        query = query.where(or_(User.display_name.ilike(term), User.email.ilike(term)))
     return [{'id': u.id, 'name': u.display_name, 'email': u.email,
              'role': 'admin' if u.is_admin else 'user', 'is_admin': u.is_admin,
              'balance': str(u.balance), 'reserved': str(u.reserved),
              'max_concurrency': u.max_concurrency, 'is_active': u.is_active,
              'deleted_at': u.deleted_at}
-            for u in db.scalars(query.order_by(User.id.desc()).limit(100))]
+            for u in db.scalars(query.order_by(User.id.desc()).offset(offset).limit(limit))]
 
 
 @router.post('/users')
@@ -149,6 +169,12 @@ def update_user(user_id: int, payload: UserUpdate, _: User = Depends(admin_user)
             if not payload.name.strip():
                 raise HTTPException(422, 'Name required')
             row.display_name = payload.name.strip()
+        if payload.email is not None:
+            email = payload.email.strip().lower()
+            duplicate = db.scalar(select(User.id).where(User.email == email, User.id != row.id))
+            if duplicate:
+                raise HTTPException(409, 'Email already exists')
+            row.email = email
         if payload.max_concurrency is not None:
             row.max_concurrency = payload.max_concurrency
         if payload.is_active is not None:
@@ -234,11 +260,15 @@ def credit(payload: CreditRequest, _: User = Depends(admin_user), db: Session = 
 
 
 @router.get('/upstreams')
-def upstreams(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+def upstreams(include_deleted: bool = False, _: User = Depends(admin_user),
+              db: Session = Depends(get_db)) -> list[dict]:
+    query = select(UpstreamAccount)
+    if not include_deleted:
+        query = query.where(UpstreamAccount.deleted_at.is_(None))
     return [{'id': row.id, 'name': row.name, 'base_url': row.base_url,
              'provider': row.provider, 'opus_free': row.opus_free, 'enabled': row.enabled,
-             'max_concurrency': row.max_concurrency}
-            for row in db.scalars(select(UpstreamAccount).order_by(UpstreamAccount.id))]
+             'max_concurrency': row.max_concurrency, 'deleted_at': row.deleted_at}
+            for row in db.scalars(query.order_by(UpstreamAccount.id))]
 
 
 @router.post('/upstreams')
@@ -253,7 +283,7 @@ def create_upstream(payload: UpstreamCreate, _: User = Depends(admin_user), db: 
     account = UpstreamAccount(name=payload.name, base_url=payload.base_url.rstrip('/'),
                               encrypted_key=encrypt_upstream_key(payload.api_key),
                               provider=payload.provider, opus_free=payload.opus_free,
-                              max_concurrency=payload.max_concurrency)
+                              max_concurrency=payload.max_concurrency, enabled=payload.enabled)
     db.add(account)
     group = default_group(db)
     db.flush()
@@ -269,10 +299,60 @@ def create_upstream(payload: UpstreamCreate, _: User = Depends(admin_user), db: 
 def update_upstream(account_id: int, payload: UpstreamUpdate, _: User = Depends(admin_user),
                     db: Session = Depends(get_db)) -> dict:
     account = db.get(UpstreamAccount, account_id)
-    if account is None:
+    if account is None or account.deleted_at:
         raise HTTPException(404, 'Upstream not found')
-    account.max_concurrency = payload.max_concurrency
-    account.enabled = payload.enabled
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(422, 'Name required')
+        if db.scalar(select(UpstreamAccount.id).where(
+                UpstreamAccount.name == name, UpstreamAccount.id != account.id)):
+            raise HTTPException(409, 'Upstream name exists')
+        account.name = name
+    if payload.base_url is not None:
+        parsed = urlparse(payload.base_url)
+        if parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname in ('localhost', '127.0.0.1')):
+            raise HTTPException(422, 'Upstream URL must use HTTPS')
+        if parsed.username or parsed.password or not parsed.hostname or parsed.query or parsed.fragment:
+            raise HTTPException(422, 'Invalid upstream URL')
+        account.base_url = payload.base_url.rstrip('/')
+    if payload.api_key is not None:
+        account.encrypted_key = encrypt_upstream_key(payload.api_key)
+    if payload.opus_free is not None:
+        account.opus_free = payload.opus_free
+    if payload.max_concurrency is not None:
+        account.max_concurrency = payload.max_concurrency
+    if payload.enabled is not None:
+        account.enabled = payload.enabled
+    db.commit()
+    return {'ok': True}
+
+
+@router.delete('/upstreams/{account_id}')
+def delete_upstream(account_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    account = db.get(UpstreamAccount, account_id)
+    if account is None or account.deleted_at:
+        raise HTTPException(404, 'Upstream not found')
+    if has_unsettled_jobs(db, GenerationJob.upstream_account_id == account_id):
+        raise HTTPException(409, 'Resolve active jobs before deleting this account')
+    routed = db.scalar(select(ModelRoute.id).join(ModelMapping).where(
+        ModelRoute.account_id == account_id, ModelMapping.deleted_at.is_(None)).limit(1))
+    if routed is not None:
+        raise HTTPException(409, 'Remove this account from published models first')
+    for member in db.scalars(select(GroupAccount).where(GroupAccount.account_id == account_id)).all():
+        db.delete(member)
+    account.enabled = False
+    account.deleted_at = utcnow()
+    db.commit()
+    return {'ok': True}
+
+
+@router.post('/upstreams/{account_id}/restore')
+def restore_upstream(account_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    account = db.get(UpstreamAccount, account_id)
+    if account is None or not account.deleted_at:
+        raise HTTPException(404, 'Deleted upstream not found')
+    account.deleted_at = None
     db.commit()
     return {'ok': True}
 
@@ -280,7 +360,7 @@ def update_upstream(account_id: int, payload: UpstreamUpdate, _: User = Depends(
 @router.get('/upstreams/{account_id}/models')
 def upstream_models(account_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
     account = db.get(UpstreamAccount, account_id)
-    if account is None:
+    if account is None or account.deleted_at:
         raise HTTPException(404, 'Upstream not found')
     if account.provider == 'novelai':
         # NovelAI does not expose a model-list endpoint.
@@ -301,14 +381,18 @@ def upstream_models(account_id: int, _: User = Depends(admin_user), db: Session 
 
 
 @router.get('/groups')
-def groups(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+def groups(include_deleted: bool = False, _: User = Depends(admin_user),
+           db: Session = Depends(get_db)) -> list[dict]:
+    query = select(UpstreamGroup)
+    if not include_deleted:
+        query = query.where(UpstreamGroup.deleted_at.is_(None))
     return [{'id': row.id, 'name': row.name, 'max_concurrency': row.max_concurrency,
-             'enabled': row.enabled, 'is_private': row.is_private,
+             'enabled': row.enabled, 'is_private': row.is_private, 'deleted_at': row.deleted_at,
              'account_ids': list(db.scalars(select(GroupAccount.account_id).where(
                  GroupAccount.group_id == row.id).order_by(GroupAccount.id))),
              'member_ids': list(db.scalars(select(GroupMember.user_id).where(
                  GroupMember.group_id == row.id).order_by(GroupMember.user_id)))}
-            for row in db.scalars(select(UpstreamGroup).order_by(UpstreamGroup.id))]
+            for row in db.scalars(query.order_by(UpstreamGroup.id))]
 
 
 @router.get('/group-recipients')
@@ -330,6 +414,8 @@ def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session 
     row = db.get(UpstreamGroup, payload.id) if payload.id else None
     if payload.id and row is None:
         raise HTTPException(404, 'Group not found')
+    if row and row.deleted_at:
+        raise HTTPException(409, 'Restore group before editing')
     duplicate = db.scalar(select(UpstreamGroup).where(UpstreamGroup.name == payload.name))
     if duplicate and duplicate.id != (row.id if row else None):
         raise HTTPException(409, 'Group name exists')
@@ -338,8 +424,9 @@ def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session 
         db.add(row)
         db.flush()
     accounts = [db.get(UpstreamAccount, account_id) for account_id in set(payload.account_ids)]
-    if any(account is None for account in accounts):
+    if any(account is None or account.deleted_at for account in accounts):
         raise HTTPException(404, 'Upstream account not found')
+    row.name = payload.name
     row.max_concurrency = payload.max_concurrency
     row.enabled = payload.enabled
     row.is_private = payload.is_private
@@ -353,7 +440,8 @@ def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session 
     for member in existing:
         if member.account_id not in selected:
             routed = db.scalar(select(ModelRoute).join(ModelMapping).where(
-                ModelMapping.group_id == row.id, ModelRoute.account_id == member.account_id))
+                ModelMapping.group_id == row.id, ModelMapping.deleted_at.is_(None),
+                ModelRoute.account_id == member.account_id))
             if routed:
                 raise HTTPException(409, 'Remove model routes before removing this account')
             db.delete(member)
@@ -364,10 +452,40 @@ def save_group(payload: GroupUpsert, _: User = Depends(admin_user), db: Session 
     return {'id': row.id}
 
 
+@router.delete('/groups/{group_id}')
+def delete_group(group_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    group = db.get(UpstreamGroup, group_id)
+    if group is None or group.deleted_at:
+        raise HTTPException(404, 'Group not found')
+    if has_unsettled_jobs(db, GenerationJob.group_id == group_id):
+        raise HTTPException(409, 'Resolve active jobs before deleting this group')
+    group.enabled = False
+    group.deleted_at = utcnow()
+    for key in db.scalars(select(ApiKey).where(ApiKey.group_id == group_id,
+                                              ApiKey.revoked_at.is_(None))):
+        key.revoked_at = utcnow()
+    db.commit()
+    return {'ok': True}
+
+
+@router.post('/groups/{group_id}/restore')
+def restore_group(group_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    group = db.get(UpstreamGroup, group_id)
+    if group is None or not group.deleted_at:
+        raise HTTPException(404, 'Deleted group not found')
+    group.deleted_at = None
+    db.commit()
+    return {'ok': True}
+
+
 @router.get('/mappings')
-def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+def mappings(include_deleted: bool = False, _: User = Depends(admin_user),
+             db: Session = Depends(get_db)) -> list[dict]:
+    query = select(ModelMapping)
+    if not include_deleted:
+        query = query.where(ModelMapping.deleted_at.is_(None))
     result = []
-    for row in db.scalars(select(ModelMapping).order_by(ModelMapping.id)):
+    for row in db.scalars(query.order_by(ModelMapping.id)):
         price = db.scalar(select(PriceVersion).where(PriceVersion.model_mapping_id == row.id).order_by(
             PriceVersion.id.desc(),
         ))
@@ -375,6 +493,7 @@ def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> li
                        'group_id': row.group_id,
                        'upstream_account_id': row.upstream_account_id,
                        'upstream_model': row.upstream_model, 'enabled': row.enabled,
+                       'deleted_at': row.deleted_at,
                        'max_concurrency': row.max_concurrency,
                        'routes': [{'account_id': route.account_id, 'upstream_model': route.upstream_model}
                                   for route in db.scalars(select(ModelRoute).where(ModelRoute.model_mapping_id == row.id)
@@ -389,7 +508,7 @@ def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> li
 @router.post('/mappings')
 def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
     group = db.get(UpstreamGroup, payload.group_id) if payload.group_id else default_group(db)
-    if group is None:
+    if group is None or group.deleted_at:
         raise HTTPException(404, 'Group not found')
     routes = payload.routes or ([RouteInput(account_id=payload.upstream_account_id,
                                            upstream_model=payload.upstream_model)]
@@ -400,7 +519,7 @@ def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Se
     if any(route.account_id not in members for route in routes):
         raise HTTPException(422, 'Every route must belong to the group')
     accounts = [db.get(UpstreamAccount, route.account_id) for route in routes]
-    if any(account is None for account in accounts) or len({account.provider for account in accounts}) != 1:
+    if any(account is None or account.deleted_at for account in accounts) or len({account.provider for account in accounts}) != 1:
         raise HTTPException(422, 'Routes must use the same provider')
     account = accounts[0]
     extra_amount = payload.extra_amount if payload.extra_amount is not None else (
@@ -408,14 +527,29 @@ def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Se
     )
     if account.provider != 'novelai' and extra_amount:
         raise HTTPException(422, 'Per-generation surcharge is only supported for NovelAI models')
-    row = db.scalar(select(ModelMapping).where(ModelMapping.group_id == group.id,
-                                                ModelMapping.public_name == payload.public_name))
+    row = db.get(ModelMapping, payload.id) if payload.id else None
+    if payload.id and row is None:
+        raise HTTPException(404, 'Model not found')
+    if row and row.deleted_at:
+        raise HTTPException(409, 'Restore model before editing')
+    duplicate = db.scalar(select(ModelMapping).where(ModelMapping.group_id == group.id,
+                                                  ModelMapping.public_name == payload.public_name))
+    if row is None and duplicate and not duplicate.deleted_at:
+        row = duplicate
+    if duplicate and duplicate.id != (row.id if row else None):
+        if duplicate.deleted_at:
+            raise HTTPException(409, 'Restore archived model with this name first')
+        raise HTTPException(409, 'Model name exists in this group')
     if row is None:
         row = ModelMapping(public_name=payload.public_name, upstream_model=routes[0].upstream_model,
                            group_id=group.id, upstream_account_id=account.id, enabled=payload.enabled)
         db.add(row)
         db.flush()
     else:
+        if has_unsettled_jobs(db, GenerationJob.model_mapping_id == row.id):
+            raise HTTPException(409, 'Resolve active jobs before editing this model')
+        row.group_id = group.id
+        row.public_name = payload.public_name
         row.upstream_account_id = account.id
         row.enabled = payload.enabled
         row.revision += 1
@@ -435,6 +569,38 @@ def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Se
                             extra_amount=extra_amount, billing_mode=billing_mode))
     db.commit()
     return {'id': row.id, 'revision': row.revision}
+
+
+@router.delete('/mappings/{mapping_id}')
+def delete_mapping(mapping_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    row = db.get(ModelMapping, mapping_id)
+    if row is None or row.deleted_at:
+        raise HTTPException(404, 'Model not found')
+    if has_unsettled_jobs(db, GenerationJob.model_mapping_id == mapping_id):
+        raise HTTPException(409, 'Resolve active jobs before deleting this model')
+    row.enabled = False
+    row.deleted_at = utcnow()
+    db.commit()
+    return {'ok': True}
+
+
+@router.post('/mappings/{mapping_id}/restore')
+def restore_mapping(mapping_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    row = db.get(ModelMapping, mapping_id)
+    if row is None or not row.deleted_at:
+        raise HTTPException(404, 'Deleted model not found')
+    group = db.get(UpstreamGroup, row.group_id)
+    if group is None or group.deleted_at:
+        raise HTTPException(409, 'Restore the group first')
+    members = set(db.scalars(select(GroupAccount.account_id).where(GroupAccount.group_id == row.group_id)))
+    routes = db.scalars(select(ModelRoute).where(ModelRoute.model_mapping_id == row.id)).all()
+    if not routes or any(route.account_id not in members or
+                         (account := db.get(UpstreamAccount, route.account_id)) is None or account.deleted_at
+                         for route in routes):
+        raise HTTPException(409, 'Restore route accounts and group membership first')
+    row.deleted_at = None
+    db.commit()
+    return {'ok': True}
 
 
 @router.get('/uncertain')
@@ -460,4 +626,13 @@ def resolve(job_id: str, payload: Resolution, _: User = Depends(admin_user),
     result = {'data': [{'url': payload.image_url}],
               'anlas_charged': payload.anlas_charged} if payload.succeeded else None
     resolve_uncertain(db, job_id, result, payload.note)
+    return {'ok': True}
+
+
+@router.delete('/uncertain/{job_id}')
+def delete_uncertain(job_id: str, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    resolve_uncertain(db, job_id, None, 'Administrator removed unresolved job and released reservation')
+    job = db.get(GenerationJob, job_id)
+    job.hidden_at = utcnow()
+    db.commit()
     return {'ok': True}

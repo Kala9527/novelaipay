@@ -61,6 +61,8 @@ for (const [path, name] of [['keys', 'keys-desktop.png'], ['jobs', 'usage-deskto
 }
 await evaluate(`[...document.querySelectorAll('.tab')].find(button => button.textContent === '分组').click()`)
 await pause(250)
+await evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('创建分组')).click()`)
+await pause(250)
 const groupsTab = await evaluate(`(() => {
   const scope = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('可见范围'))?.querySelector('select')
   const defaultPublic = scope?.value === 'public'
@@ -75,6 +77,8 @@ const privateControls = await evaluate(`({
 })`)
 if (!groupsTab || !privateControls.recipients || !privateControls.saveDisabled) throw new Error(`Private group controls: ${JSON.stringify(privateControls)}`)
 await evaluate(`[...document.querySelectorAll('.tab')].find(button => button.textContent === '模型与定价').click()`)
+await pause(250)
+await evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('发布模型')).click()`)
 await pause(250)
 const backupLimit = await evaluate(`(() => {
   const group = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('分组'))?.querySelector('select')
@@ -102,6 +106,25 @@ for (let index = 0; index < routeControl - 2; index++) {
 }
 const backupFull = await evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('添加备用账号')).disabled`)
 if (!backupFull) throw new Error('Backup route button remained enabled at the account limit')
+await evaluate(`[...document.querySelectorAll('.tab')].find(button => button.textContent === '上游账户').click()`)
+await pause(350)
+const accountActions = await evaluate(`({edit:!!document.querySelector('[title="编辑账户"]'),remove:!!document.querySelector('[title="删除账户"]'),search:!!document.querySelector('[aria-label="搜索上游账户"]')})`)
+if (!accountActions.edit || !accountActions.remove || !accountActions.search) throw new Error(`Account actions: ${JSON.stringify(accountActions)}`)
+await evaluate(`document.querySelector('[title="编辑账户"]').click()`)
+await pause(250)
+const accountEditor = await evaluate(`Boolean(document.querySelector('#admin-editor input[placeholder="留空则不修改"]'))`)
+if (!accountEditor) throw new Error('Upstream editor did not open')
+await evaluate(`[...document.querySelectorAll('.tab')].find(button => button.textContent === '用户与余额').click()`)
+await pause(350)
+const userActions = await evaluate(`({create:document.body.innerText.includes('创建用户'),edit:!!document.querySelector('[title="编辑用户"]'),remove:!!document.querySelector('[title="删除用户"]')})`)
+if (!userActions.create || !userActions.edit || !userActions.remove) throw new Error(`User actions: ${JSON.stringify(userActions)}`)
+await screenshot('admin-users-desktop.png')
+await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+await pause(400)
+const adminMobile = await evaluate(`({width:document.documentElement.scrollWidth,viewport:innerWidth})`)
+if (adminMobile.width > adminMobile.viewport + 2) throw new Error(`Admin mobile overflow: ${JSON.stringify(adminMobile)}`)
+await screenshot('admin-users-mobile.png')
+await command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
 await command('Page.navigate', { url: 'http://127.0.0.1:8009/workshop' })
 await pause(1200)
 const historyControls = await evaluate(`(() => {
@@ -115,7 +138,7 @@ const lightbox = await evaluate(`Boolean(document.querySelector('.studio-lightbo
 if (!historyControls.controls || !lightbox) throw new Error(`Image history controls: ${JSON.stringify({ historyControls, lightbox })}`)
 await screenshot('workshop-large-image.png')
 await evaluate(`document.querySelector('.studio-lightbox button[title="关闭"]').click()`)
-console.log('new controls', { privateControls, backupFull, historyControls, lightbox })
+console.log('new controls', { privateControls, backupFull, accountActions, userActions, adminMobile, historyControls, lightbox })
 await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
 await pause(1000)
 await screenshot('workshop-mobile.png')

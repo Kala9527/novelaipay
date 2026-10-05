@@ -59,6 +59,7 @@ class UpstreamAccount(Base):
     opus_free: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=10)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class UpstreamGroup(Base):
@@ -68,6 +69,7 @@ class UpstreamGroup(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, default=10)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_private: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GroupMember(Base):
@@ -106,6 +108,7 @@ class ModelMapping(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     account: Mapped[UpstreamAccount] = relationship()
 
 
