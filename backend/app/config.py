@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     upstream_timeout_seconds: int = 120
     job_lease_seconds: int = 180
     job_poll_seconds: int = 3
+    cors_allowed_origins: str = 'http://127.0.0.1:8000,http://localhost:8000'
 
     @property
     def sqlalchemy_url(self) -> URL | str:

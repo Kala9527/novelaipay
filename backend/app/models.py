@@ -42,6 +42,7 @@ class ApiKey(Base):
     name: Mapped[str] = mapped_column(String(80))
     prefix: Mapped[str] = mapped_column(String(18), index=True)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    encrypted_key: Mapped[str | None] = mapped_column(Text)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     user: Mapped[User] = relationship()
@@ -75,6 +76,7 @@ class PriceVersion(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     model_mapping_id: Mapped[int] = mapped_column(ForeignKey('model_mappings.id'), index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    extra_amount: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=Decimal('0'))
     currency: Mapped[str] = mapped_column(String(3), default='CNY')
     billing_mode: Mapped[str] = mapped_column(String(20), default='fixed')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -108,6 +110,7 @@ class GenerationJob(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class WalletLedger(Base):

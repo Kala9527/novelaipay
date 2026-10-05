@@ -14,13 +14,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def run_once() -> bool:
+def run_once(job_id: str | None = None) -> bool:
     settings = get_settings()
     with SessionLocal() as db:
         recovered = recover_expired(db)
         if recovered:
             logger.warning('Marked %s expired jobs for reconciliation', recovered)
-        job = claim_job(db, settings.job_lease_seconds)
+        job = claim_job(db, settings.job_lease_seconds, job_id)
         if job is None:
             return False
         job_id = job.id

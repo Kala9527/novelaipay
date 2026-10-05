@@ -7,9 +7,8 @@ from ..db import get_db
 from ..models import ApiKey, GenerationJob
 from ..novelai import ImageParameters
 from ..services import submit_job
-from ..upstream import IMAGE_DIR
 from .deps import downstream_key
-from .user import job_view
+from .user import image_path, job_view
 
 
 router = APIRouter(prefix='/v1', tags=['generation'])
@@ -47,7 +46,7 @@ def get_job(job_id: str, api_key: ApiKey = Depends(downstream_key), db: Session 
 def get_job_image(job_id: str, api_key: ApiKey = Depends(downstream_key),
                   db: Session = Depends(get_db)):
     job = db.get(GenerationJob, job_id)
-    image = IMAGE_DIR / f'{job_id}.png'
-    if job is None or job.user_id != api_key.user_id or job.status != 'succeeded' or not image.is_file():
+    image = image_path(job_id)
+    if job is None or job.user_id != api_key.user_id or job.status != 'succeeded' or image is None:
         raise HTTPException(404, 'Image not found')
-    return FileResponse(image, media_type='image/png', filename=f'{job_id}.png')
+    return FileResponse(image, media_type='image/png' if image.suffix == '.png' else 'image/jpeg', filename=image.name)

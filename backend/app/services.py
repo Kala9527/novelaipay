@@ -12,7 +12,7 @@ from .models import (
     ApiKey, GenerationJob, JobStatus, ModelMapping, PaymentOrder, PriceVersion,
     UpstreamAccount, UsageRecord, User, WalletLedger, utcnow,
 )
-from .novelai import ImageParameters, estimate_anlas, validate_size
+from .novelai import ImageParameters, estimate_anlas, store_image_inputs, validate_size
 
 
 def require_user_lock(db: Session, user_id: int, allow_inactive: bool = False) -> User:
@@ -62,7 +62,13 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             # Keep room for changes in NovelAI's unpublished price formula.
-            amount = price.amount * anlas_cost * 2
+            amount = price.amount * anlas_cost * 2 + price.extra_amount
+            try:
+                stored_parameters = store_image_inputs(parameters)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        else:
+            stored_parameters = store_image_inputs(parameters)
         active_total = db.scalar(select(func.count()).select_from(GenerationJob).where(
             GenerationJob.user_id == user.id,
             GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.UNCERTAIN]),
@@ -84,7 +90,7 @@ def submit_job(db: Session, api_key: ApiKey, model_name: str, prompt: str, size:
             model_mapping_id=mapping.id, price_version_id=price.id,
             upstream_account_id=account.id, public_model=mapping.public_name,
             upstream_model=mapping.upstream_model, mapping_revision=mapping.revision,
-            prompt=prompt, size=size, parameters=parameters.model_dump(), anlas_cost=anlas_cost,
+            prompt=prompt, size=size, parameters=stored_parameters, anlas_cost=anlas_cost,
             request_hash=request_hash, idempotency_key=idem, status=JobStatus.QUEUED,
             reserved_amount=amount,
         )
@@ -124,9 +130,12 @@ def record_payment(db: Session, provider: str, transaction_id: str, user_id: int
     return True
 
 
-def claim_job(db: Session, lease_seconds: int) -> GenerationJob | None:
+def claim_job(db: Session, lease_seconds: int, job_id: str | None = None) -> GenerationJob | None:
     with db.begin():
-        query = select(GenerationJob).where(GenerationJob.status == JobStatus.QUEUED).order_by(
+        query = select(GenerationJob).where(GenerationJob.status == JobStatus.QUEUED)
+        if job_id is not None:
+            query = query.where(GenerationJob.id == job_id)
+        query = query.order_by(
             GenerationJob.created_at, GenerationJob.id,
         ).limit(20)
         if db.bind.dialect.name == 'postgresql':
@@ -184,10 +193,10 @@ def finish_job(db: Session, job_id: str, result: dict | None, error: str | None,
                 job.error = 'NovelAI charge missing; reconcile manually'
                 return
             price = db.get(PriceVersion, job.price_version_id)
-            charged_amount = price.amount * actual_anlas
-            if charged_amount > job.reserved_amount:
+            charged_amount = price.amount * actual_anlas + price.extra_amount
+            if charged_amount > job.reserved_amount and user.balance - user.reserved + job.reserved_amount < charged_amount:
                 job.status = JobStatus.UNCERTAIN
-                job.error = 'NovelAI charge exceeds reservation; reconcile manually'
+                job.error = 'NovelAI charge exceeds available balance; reconcile manually'
                 return
         user.reserved -= job.reserved_amount
         job.finished_at = utcnow()
@@ -196,7 +205,7 @@ def finish_job(db: Session, job_id: str, result: dict | None, error: str | None,
             job.error = error or 'Upstream failed'
             return
         job.status = JobStatus.SUCCEEDED
-        job.result = result
+        # Images are served from disk and never serialized into the job row.
         job.reserved_amount = charged_amount
         job.anlas_cost = result['anlas_charged'] if result is not None and job.anlas_cost is not None else job.anlas_cost
         user.balance -= charged_amount
@@ -223,7 +232,7 @@ def resolve_uncertain(db: Session, job_id: str, result: dict | None, error: str 
             if not isinstance(actual_anlas, int) or actual_anlas < 0:
                 raise HTTPException(422, 'Actual Anlas charge required')
             price = db.get(PriceVersion, job.price_version_id)
-            charged_amount = price.amount * actual_anlas
+            charged_amount = price.amount * actual_anlas + price.extra_amount
             if user.balance - user.reserved + job.reserved_amount < charged_amount:
                 raise HTTPException(402, 'Credit wallet before reconciling charge')
         user.reserved -= job.reserved_amount
@@ -233,7 +242,7 @@ def resolve_uncertain(db: Session, job_id: str, result: dict | None, error: str 
             job.status = JobStatus.FAILED
         else:
             job.status = JobStatus.SUCCEEDED
-            job.result = result
+            # Reconciliation updates billing metadata without persisting image data.
             job.reserved_amount = charged_amount
             if job.anlas_cost is not None:
                 job.anlas_cost = result['anlas_charged']

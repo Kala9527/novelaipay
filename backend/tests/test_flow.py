@@ -11,6 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 import httpx
+from PIL import Image
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
@@ -30,11 +31,16 @@ from app import db
 from app.bootstrap import main as bootstrap_admin
 from app.config import AdminConfig, RegistrationConfig, get_business_config
 from app.main import app
-from app.models import Base, GenerationJob, JobStatus, UpstreamAccount, utcnow
+from app.models import Base, GenerationJob, JobStatus, UpstreamAccount, UsageRecord, utcnow
 from app.models import User
 from app.security import verify_password
 from app.services import claim_job, recover_expired
 from app.worker import run_once
+from app.api.tavern import normalize_request
+from app.novelai import ImageParameters, generation_payload
+from app.upstream import OpenAIImageAdapter
+from app.security import encrypt_upstream_key
+import base64
 
 
 class FlowTest(unittest.TestCase):
@@ -201,6 +207,8 @@ class FlowTest(unittest.TestCase):
             'public_name': 'anime', 'upstream_account_id': account['id'],
             'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
         }).status_code, 200)
+        self.assertEqual(self.client.get('/api/admin/mappings',
+                                         headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()[0]['extra_amount'], '0.1000')
         admin_id = self.client.get('/api/auth/me').json()['id']
         self.assertEqual(self.admin_post('/api/admin/credit', {
             'user_id': admin_id, 'amount': '10', 'reference': 'novelai-test',
@@ -225,7 +233,6 @@ class FlowTest(unittest.TestCase):
                     for value in (100, 85)]
         with tempfile.TemporaryDirectory() as directory:
             with patch('app.upstream.IMAGE_DIR', Path(directory)), patch('app.api.user.IMAGE_DIR', Path(directory)), \
-                 patch('app.api.generation.IMAGE_DIR', Path(directory)), \
                  patch('app.upstream.httpx.get', side_effect=balances), \
                  patch('app.upstream.httpx.post', return_value=response) as send:
                 self.assertTrue(run_once())
@@ -235,11 +242,344 @@ class FlowTest(unittest.TestCase):
                 job = self.client.get('/v1/jobs/' + submitted.json()['id'], headers=headers).json()
                 self.assertEqual(job['status'], 'succeeded')
                 self.assertEqual(job['anlas_cost'], 15)
-                self.assertEqual(job['amount'], '1.5000')
+                self.assertEqual(job['amount'], '1.6000')
+                with db.SessionLocal() as session:
+                    self.assertIsNone(session.get(GenerationJob, job['id']).result)
                 self.assertEqual(self.client.get(job['result']['data'][0]['url']).status_code, 200)
                 self.assertEqual(self.client.get(f'/v1/jobs/{job["id"]}/image',
                                                  headers={'Authorization': 'Bearer ' + key}).status_code, 200)
-                self.assertEqual(self.client.get('/api/billing').json()['balance'], '8.5000')
+                self.assertEqual(self.client.get('/api/billing').json()['balance'], '8.4000')
+
+    def test_usage_visibility_filters_and_admin_deletion(self):
+        self.login('admin@example.com', 'long-test-password')
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'usage-upstream', 'base_url': 'http://127.0.0.1:9999/v1',
+            'api_key': 'upstream-secret',
+        }).json()
+        self.admin_post('/api/admin/mappings', {
+            'public_name': 'usage-model', 'upstream_account_id': account['id'],
+            'upstream_model': 'image', 'price': '1.0000',
+        })
+        user = self.admin_post('/api/admin/users', {
+            'name': 'Usage User', 'email': 'usage@example.com',
+            'password': 'usage-password-123',
+        }).json()
+        for user_id in (admin_id, user['id']):
+            self.admin_post('/api/admin/credit', {
+                'user_id': user_id, 'amount': '10', 'reference': f'usage-{user_id}',
+            })
+        admin_key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {'name': 'usage'}).json()['key']
+        user_key = self.admin_post(f'/api/admin/users/{user["id"]}/keys', {'name': 'usage'}).json()['key']
+        jobs = []
+        for index, key in enumerate((admin_key, user_key, user_key)):
+            response = self.client.post('/v1/images/generations',
+                json={'model': 'usage-model', 'prompt': f'usage {index}'},
+                headers={'Authorization': 'Bearer ' + key,
+                         'Idempotency-Key': f'usage-{index}'})
+            self.assertEqual(response.status_code, 202, response.text)
+            jobs.append(response.json()['id'])
+            with patch('app.worker.OpenAIImageAdapter.generate',
+                       return_value={'data': [{'url': 'https://example.com/image.png'}]}):
+                self.assertTrue(run_once())
+        self.assertEqual(self.client.get('/api/usage').json()['total'], 3)
+        self.assertEqual(self.client.get('/api/usage/models').json(), ['usage-model'])
+        filtered = self.client.get(f'/api/usage?user_id={user["id"]}&status=succeeded&model=usage-model').json()
+        self.assertEqual(filtered['total'], 2)
+        self.assertTrue(all(row['user_name'] == 'Usage User' for row in filtered['items']))
+        self.assertEqual(self.client.get('/api/usage?limit=1&offset=1').json()['total'], 3)
+        self.assertEqual(self.client.get('/api/usage?search=' + jobs[0][:8]).json()['total'], 1)
+        with db.SessionLocal() as session:
+            self.assertTrue(all(session.get(GenerationJob, job_id).result is None for job_id in jobs))
+
+        self.client.cookies.clear()
+        self.login('usage@example.com', 'usage-password-123')
+        self.assertEqual(self.client.get('/api/usage').json()['total'], 2)
+        self.assertEqual(self.client.get('/api/usage/models').json(), ['usage-model'])
+        self.assertEqual(self.client.get(f'/api/usage?user_id={admin_id}').json()['total'], 2)
+        self.assertEqual(self.client.post('/api/usage/delete', json={'ids': [jobs[0]]},
+                         headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 403)
+        self.client.cookies.clear()
+        self.login('admin@example.com', 'long-test-password')
+        self.assertEqual(self.admin_post('/api/usage/delete', {'ids': jobs[:2]}).json()['deleted'], 2)
+        self.assertEqual(self.client.get('/api/usage').json()['total'], 1)
+        with db.SessionLocal() as session:
+            self.assertIsNotNone(session.get(GenerationJob, jobs[0]).hidden_at)
+            self.assertIsNotNone(session.scalar(select(UsageRecord).where(UsageRecord.job_id == jobs[1])))
+        self.assertEqual(self.admin_post('/api/usage/delete', {'ids': [jobs[2]]}).json()['deleted'], 1)
+        self.assertEqual(self.client.get('/api/usage').json()['total'], 0)
+        with db.SessionLocal() as session:
+            self.assertEqual(len(session.scalars(select(UsageRecord)).all()), 3)
+        pending = self.client.post('/v1/images/generations',
+            json={'model': 'usage-model', 'prompt': 'Still running'},
+            headers={'Authorization': 'Bearer ' + admin_key,
+                     'Idempotency-Key': 'usage-pending'})
+        self.assertEqual(pending.status_code, 202, pending.text)
+        self.assertEqual(self.admin_post('/api/usage/delete',
+                         {'ids': [pending.json()['id']]}).status_code, 409)
+        self.assertEqual(self.client.get('/api/usage').json()['total'], 1)
+
+    def test_openai_image_is_delivered_from_disk(self):
+        account = UpstreamAccount(base_url='https://images.example/v1',
+                                  encrypted_key=encrypt_upstream_key('secret'))
+        job = GenerationJob(id='openai-image-test', upstream_model='image',
+                            prompt='A mountain', size='512x512')
+        request = httpx.Request('POST', 'https://images.example/v1/images/generations')
+        response = httpx.Response(200, json={'data': [{'url': 'https://images.example/out.png'}]},
+                                  request=request)
+        image_request = httpx.Request('GET', 'https://images.example/out.png')
+        image = httpx.Response(200, content=b'\x89PNG\r\n\x1a\nimage', request=image_request)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('app.upstream.IMAGE_DIR', Path(directory)), \
+             patch('app.upstream.httpx.post', return_value=response), \
+             patch('app.upstream.httpx.get', return_value=image):
+            result = OpenAIImageAdapter(account, 5).generate(job)
+            self.assertEqual(result['data'][0]['url'], '/api/jobs/openai-image-test/image')
+            self.assertEqual((Path(directory) / 'openai-image-test.png').read_bytes(), image.content)
+
+    def test_tavern_model_discovery_with_key_and_cors(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'novelai', 'provider': 'novelai',
+            'base_url': 'http://127.0.0.1:9999', 'api_key': 'upstream-secret',
+        }).json()
+        for public_name in ('nai-diffusion-4-5-full', 'tavern-anime'):
+            created = self.admin_post('/api/admin/mappings', {
+                'public_name': public_name, 'upstream_account_id': account['id'],
+                'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
+            })
+            self.assertEqual(created.status_code, 200, created.text)
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        issued = self.admin_post(f'/api/admin/users/{admin_id}/keys', {'name': 'tavern'}).json()
+        self.assertTrue(issued['key'].startswith('pst-'))
+        path = '/genarate/v1/models'
+        self.assertEqual(self.client.get(path).status_code, 401)
+        response = self.client.get(path, headers={'Authorization': 'Bearer ' + issued['key']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {'object': 'list', 'data': [
+            {'id': name, 'object': 'model', 'owned_by': 'novelaipay'}
+            for name in ('nai-diffusion-4-5-full', 'tavern-anime')]})
+        preflight = self.client.options(path, headers={
+            'Origin': 'http://127.0.0.1:8000',
+            'Access-Control-Request-Method': 'GET',
+            'Access-Control-Request-Headers': 'authorization',
+        })
+        self.assertEqual(preflight.status_code, 200, preflight.text)
+        self.assertEqual(preflight.headers['access-control-allow-origin'], 'http://127.0.0.1:8000')
+        self.assertEqual(self.client.get('/genarate/unknown').status_code, 404)
+
+    def test_novelai_proxy_returns_zip_and_charges_actual_anlas(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'novelai', 'provider': 'novelai',
+            'base_url': 'https://image.novelai.net', 'api_key': 'upstream-secret',
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'anime', 'upstream_account_id': account['id'],
+            'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
+        }).status_code, 200)
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': admin_id, 'amount': '10', 'reference': 'proxy-test',
+        }).status_code, 200)
+        key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {'name': 'nai-proxy'}).json()['key']
+        headers = {'Authorization': 'Bearer ' + key}
+        payload = {'action': 'generate', 'model': 'nai-diffusion-4-5-full',
+                   'input': 'a red kite', 'parameters': {
+                       'width': 1024, 'height': 1024, 'steps': 23,
+                       'negative_prompt': 'clouds', 'sm': True,
+                       'dynamic_thresholding': True, 'n_samples': 1,
+                       'v4_prompt': {'caption': {'base_caption': 'a red kite',
+                           'char_captions': [{'char_caption': 'red coat',
+                                              'centers': [{'x': 0.2, 'y': 0.8}]}]}},
+                       'v4_negative_prompt': {'caption': {'base_caption': 'clouds',
+                           'char_captions': [{'char_caption': 'hat'}]}},
+                   }}
+        self.assertEqual(self.client.post('/ai/generate-image', json={
+            **payload, 'action': 'img2img'}, headers=headers).status_code, 422)
+        self.assertEqual(self.client.post('/ai/generate-image', json={
+            **payload, 'parameters': {**payload['parameters'], 'n_samples': 2}},
+            headers=headers).status_code, 422)
+        archive_bytes = io.BytesIO()
+        image = b'\x89PNG\r\n\x1a\nimage'
+        with zipfile.ZipFile(archive_bytes, 'w') as archive:
+            archive.writestr('image_0.png', image)
+        generation_request = httpx.Request('POST', 'https://image.novelai.net/ai/generate-image')
+        generation_response = httpx.Response(200, content=archive_bytes.getvalue(),
+                                             request=generation_request)
+        balance_request = httpx.Request('GET', 'https://image.novelai.net/user/subscription')
+        balances = [httpx.Response(200, json={'trainingStepsLeft': {
+            'fixedTrainingStepsLeft': value, 'purchasedTrainingSteps': 0}}, request=balance_request)
+                    for value in (100, 60)]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('app.upstream.IMAGE_DIR', Path(directory)), \
+                 patch('app.api.user.IMAGE_DIR', Path(directory)), \
+                 patch('app.upstream.httpx.get', side_effect=balances) as balance, \
+                 patch('app.upstream.httpx.post', return_value=generation_response) as send:
+                result = self.client.post('/ai/generate-image', json=payload, headers=headers)
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertEqual(result.headers['content-type'], 'application/zip')
+                with zipfile.ZipFile(io.BytesIO(result.content)) as archive:
+                    self.assertEqual(archive.read('image_0.png'), image)
+                sent = send.call_args.kwargs['json']
+                self.assertEqual(sent['parameters']['width'], 1024)
+                self.assertEqual(sent['parameters']['sm'], False)
+                self.assertEqual(sent['parameters']['dynamic_thresholding'], True)
+                self.assertEqual(sent['parameters']['v4_prompt']['caption']['char_captions'][0],
+                                 {'char_caption': 'red coat', 'centers': [{'x': 0.2, 'y': 0.8}]})
+                self.assertEqual(sent['parameters']['v4_negative_prompt']['caption']['char_captions'][0]
+                                 ['char_caption'], 'hat')
+                self.assertEqual(balance.call_args.args[0], 'https://image.novelai.net/user/subscription')
+        self.assertEqual(self.client.get('/api/billing').json()['balance'], '5.9000')
+        self.assertEqual(self.client.get('/api/billing').json()['reserved'], '0.0000')
+
+    def test_tavern_nai_proxy_shape_returns_accessible_image(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'novelai', 'provider': 'novelai',
+            'base_url': 'http://127.0.0.1:9999', 'api_key': 'upstream-secret',
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'nai-diffusion-4-5-full', 'upstream_account_id': account['id'],
+            'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
+        }).status_code, 200)
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        self.assertEqual(self.admin_post('/api/admin/credit', {
+            'user_id': admin_id, 'amount': '10', 'reference': 'tavern-proxy',
+        }).status_code, 200)
+        key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {'name': 'tavern'}).json()['key']
+        body = {'model': 'nai-diffusion-4-5-full', 'tag': 'a red kite',
+                'negative': 'clouds', 'size': '横图', 'steps': '20',
+                'scale': '7', 'cfg': '0', 'stream': 1, 'seed': -1}
+        self.assertEqual(self.client.post('/genarate', json={
+            **body, 'addition': {'imageBase64': 'encoded-image'}},
+            headers={'Authorization': 'Bearer ' + key}).status_code, 422)
+        with tempfile.TemporaryDirectory() as directory:
+            def generated(job):
+                (Path(directory) / f'{job.id}.png').write_bytes(b'\x89PNG\r\n\x1a\nimage')
+                return {'data': [{'url': f'/api/jobs/{job.id}/image'}], 'anlas_charged': 12}
+
+            with patch('app.api.user.IMAGE_DIR', Path(directory)), \
+                 patch('app.worker.NovelAIImageAdapter.generate', side_effect=generated):
+                response = self.client.post('/genarate', json=body,
+                                            headers={'Authorization': 'Bearer ' + key})
+                self.assertEqual(response.status_code, 200, response.text)
+                image_url = response.json()['url']
+                self.assertEqual(response.json()['data'][0]['url'], image_url)
+                self.assertEqual(self.client.get(image_url).status_code, 200)
+                self.assertEqual(self.client.get(image_url.replace('token=', 'token=bad')).status_code, 404)
+                job = self.client.get('/v1/jobs/' + response.json()['job_id'],
+                                      headers={'Authorization': 'Bearer ' + key}).json()
+                self.assertEqual(job['size'], '1216x832')
+                self.assertEqual(job['parameters']['negative_prompt'], 'clouds')
+                self.assertEqual(job['amount'], '1.3000')
+
+    def test_img2img_plugin_mapping_and_zero_anlas_surcharge(self):
+        self.login('admin@example.com', 'long-test-password')
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'novelai', 'provider': 'novelai',
+            'base_url': 'http://127.0.0.1:9999', 'api_key': 'upstream-secret',
+            'opus_free': True,
+        }).json()
+        self.assertEqual(self.admin_post('/api/admin/mappings', {
+            'public_name': 'nai-diffusion-4-5-full', 'upstream_account_id': account['id'],
+            'upstream_model': 'nai-diffusion-4-5-full', 'price': '0.1000',
+            'extra_amount': '0.1000',
+        }).status_code, 200)
+        admin_id = self.client.get('/api/auth/me').json()['id']
+        self.admin_post('/api/admin/credit', {'user_id': admin_id, 'amount': '1', 'reference': 'img2img'})
+        key = self.admin_post(f'/api/admin/users/{admin_id}/keys', {'name': 'img2img'}).json()['key']
+        input_image = io.BytesIO()
+        Image.new('RGB', (16, 16), 'red').save(input_image, format='PNG')
+        source = base64.b64encode(input_image.getvalue()).decode()
+        body = {'model': 'nai-diffusion-4-5-full', 'tag': 'a red kite',
+                'addition': {'imageToImageBase64': source, 'i2iforce': '0.65',
+                             'i2icl': '0.1', 'vibeTransferList': [{
+                                 'base64': source, 'infoExtract': 0.8, 'refStrength': 0.4}]}}
+        model, prompt, size, params = normalize_request(body)
+        self.assertEqual(params.action, 'img2img')
+        self.assertEqual(params.strength, 0.65)
+        self.assertEqual(params.references[0].strength, 0.4)
+        _, _, _, roles = normalize_request({'model': model, 'tag': prompt,
+            'addition': {'multiRoleList': [
+                {'prompt': 'red coat', 'uc': 'hat', 'center': {'x': 0.2, 'y': 0.8}},
+                {'tags': ['blue scarf'], 'position': 'C3'},
+            ]}})
+        self.assertEqual(roles.character_prompts[0].negative_prompt, 'hat')
+        self.assertEqual(roles.character_prompts[0].top, 0.8)
+        self.assertEqual(roles.character_prompts[1].prompt, 'blue scarf')
+        _, _, _, variety = normalize_request({'model': model, 'tag': prompt,
+                                               'variety_boost': True, 'decrisper': True})
+        self.assertTrue(variety.dynamic_thresholding)
+        self.assertAlmostEqual(generation_payload(model, prompt, size, variety)['parameters']
+                               ['skip_cfg_above_sigma'], (1024 * 1024 / 1011712) ** 0.5 * 58)
+        self.assertEqual(generation_payload(model, prompt, size, roles)['parameters']
+                         ['v4_prompt']['caption']['char_captions'][0]['centers'],
+                         [{'x': 0.2, 'y': 0.8}])
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('app.novelai.INPUT_DIR', Path(directory)):
+                submitted = self.client.post('/v1/images/generations', json={
+                    'model': model, 'prompt': prompt, 'size': size,
+                    'parameters': params.model_dump()}, headers={
+                        'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'img2img-zero'})
+                self.assertEqual(submitted.status_code, 202, submitted.text)
+                self.assertEqual(submitted.json()['amount'], '0.5000')
+                self.assertNotIn(source, json.dumps(submitted.json()))
+                with db.SessionLocal() as session:
+                    job = session.get(GenerationJob, submitted.json()['id'])
+                    upstream = generation_payload(job.upstream_model, job.prompt, job.size,
+                                                  type(params).model_validate(job.parameters))
+                    self.assertEqual(upstream['action'], 'img2img')
+                    self.assertEqual(upstream['parameters']['image'], source)
+                    self.assertEqual(upstream['parameters']['reference_image_multiple'], [source])
+                    asset = job.parameters['image']
+                    infill = generation_payload(job.upstream_model, job.prompt, job.size,
+                        ImageParameters(action='infill', image=asset, mask=asset,
+                                        inpaint_img2img_strength=0.5))
+                    self.assertEqual(infill['model'], 'nai-diffusion-4-5-full-inpainting')
+                    self.assertEqual(infill['parameters']['img2img']['strength'], 0.5)
+                    character = generation_payload(job.upstream_model, job.prompt, job.size,
+                        ImageParameters(precise_reference={'image': asset}))
+                    self.assertEqual(character['parameters']['director_reference_descriptions'][0]
+                                     ['caption']['base_caption'], 'character&style')
+                    self.assertEqual(character['parameters']['director_reference_secondary_strength_values'], [1])
+                    with Image.open(io.BytesIO(base64.b64decode(
+                            character['parameters']['director_reference_images'][0]))) as reference:
+                        self.assertEqual(reference.size, (1472, 1472))
+                archive_bytes = io.BytesIO()
+                with zipfile.ZipFile(archive_bytes, 'w') as archive:
+                    archive.writestr('image_0.png', b'\x89PNG\r\n\x1a\nimage')
+                balance_request = httpx.Request('GET', 'http://127.0.0.1:9999/user/subscription')
+                balances = [httpx.Response(200, json={'trainingStepsLeft': {
+                    'fixedTrainingStepsLeft': 100, 'purchasedTrainingSteps': 0}},
+                    request=balance_request) for _ in range(2)]
+                encoded = httpx.Response(200, content=b'vibe-token', request=httpx.Request(
+                    'POST', 'http://127.0.0.1:9999/ai/encode-vibe'))
+                generated = httpx.Response(200, content=archive_bytes.getvalue(), request=httpx.Request(
+                    'POST', 'http://127.0.0.1:9999/ai/generate-image'))
+                with patch('app.upstream.IMAGE_DIR', Path(directory)), \
+                     patch('app.upstream.httpx.get', side_effect=balances), \
+                     patch('app.upstream.httpx.post', side_effect=[encoded, generated]) as send:
+                    self.assertTrue(run_once())
+                    self.assertEqual(send.call_args_list[0].kwargs['json']['information_extracted'], 0.8)
+                    generation = send.call_args_list[1].kwargs['json']
+                    self.assertEqual(generation['parameters']['reference_image_multiple'],
+                                     [base64.b64encode(b'vibe-token').decode()])
+                    self.assertNotIn('reference_information_extracted_multiple', generation['parameters'])
+                job = self.client.get('/v1/jobs/' + submitted.json()['id'], headers={
+                    'Authorization': 'Bearer ' + key}).json()
+                self.assertEqual(job['amount'], '0.1000')
+                self.assertEqual(job['anlas_cost'], 0)
+                self.assertEqual(self.client.get('/api/billing').json()['balance'], '0.9000')
+                failed = self.client.post('/v1/images/generations', json={
+                    'model': model, 'prompt': prompt, 'size': size,
+                    'parameters': params.model_dump()}, headers={
+                        'Authorization': 'Bearer ' + key, 'Idempotency-Key': 'img2img-failed'})
+                self.assertEqual(failed.status_code, 202, failed.text)
+                with patch('app.worker.NovelAIImageAdapter.generate', side_effect=ValueError('upstream rejected')):
+                    self.assertTrue(run_once())
+                self.assertEqual(self.client.get('/api/billing').json()['balance'], '0.9000')
+                self.assertEqual(self.client.get('/api/billing').json()['reserved'], '0.0000')
 
     def test_end_to_end_balance_idempotency_payment_and_recovery(self):
         self.login('admin@example.com', 'long-test-password')
@@ -303,8 +643,10 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(failed.status_code, 202, failed.text)
         with patch('app.worker.OpenAIImageAdapter.generate', side_effect=ValueError('invalid response')):
             self.assertTrue(run_once())
-        self.assertEqual(self.client.get('/v1/jobs/' + failed.json()['id'],
-                                         headers={'Authorization': 'Bearer ' + key}).json()['status'], 'failed')
+        failed_job = self.client.get('/v1/jobs/' + failed.json()['id'],
+                                     headers={'Authorization': 'Bearer ' + key}).json()
+        self.assertEqual(failed_job['status'], 'failed')
+        self.assertEqual(failed_job['amount'], '0.0000')
         self.assertEqual(self.client.get('/api/billing').json()['balance'], '12.0000')
 
         pending = self.client.post('/v1/images/generations', json=payload,

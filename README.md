@@ -32,3 +32,11 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 See [开发部署文档.md](开发部署文档.md) for the Ubuntu VM, production image transfer, API examples and troubleshooting.
 
 For NovelAI, add an upstream account with provider `novelai`, base URL `https://image.novelai.net`, and an Access Token. Map a public model to `nai-diffusion-4-5-full` (or another supported model) and configure CNY per Anlas. A downstream key submits jobs through `/v1/images/generations`; the worker settles against the upstream account's actual Anlas balance change. Use a dedicated upstream account and see the deployment document for pricing limits and image retrieval.
+
+### Tavern Scene Plugin 1.2.2
+
+In the plugin's image generation settings, choose **NovelAI**, then the **third-party proxy** channel. Set the proxy URL to `http://127.0.0.1:8009/genarate` (or the port where this API is running), the API key to a downstream `pst-` key, and the model to an enabled public model such as `nai-diffusion-4-5-full`. The plugin's streaming proxy option is supported. The service returns a short-lived signed image URL that the plugin downloads immediately.
+
+NovelAI requests are billed at the configured CNY-per-Anlas rate using the upstream account's actual Anlas balance change, plus a per-generation surcharge that defaults to CNY 0.1. For example, at CNY 0.1 per Anlas, a generation charged zero Anlas upstream costs CNY 0.1 downstream. Size, steps and supported model options can affect the Anlas charge. SMEA is ignored for NovelAI V4/V5 models, which do not support it. The initial reservation is an estimate and is released or adjusted on completion. Text-to-image, image-to-image, inpainting, Vibe transfer, precise reference and multi-character prompts are supported. The native NovelAI proxy route `/ai/generate-image` returns the official ZIP image format.
+
+NovelAI's [subscription and Anlas rules](https://docs.novelai.net/en/subscription/) and [image generation basics](https://docs.novelai.net/en/image/basics/) are the reference for free-generation conditions. The project settles from the real upstream balance difference because NovelAI does not publish a complete current price formula.

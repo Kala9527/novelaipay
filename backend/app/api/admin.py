@@ -7,9 +7,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..config import get_settings
 from ..models import ApiKey, GenerationJob, JobStatus, ModelMapping, PriceVersion, UpstreamAccount, User, utcnow
-from ..security import encrypt_upstream_key, hash_password, new_api_key
+from ..security import decrypt_upstream_key, encrypt_upstream_key, hash_password, new_api_key
 from ..services import credit_wallet, resolve_uncertain
+from ..upstream import UpstreamUncertain, store_remote_image
 from .deps import admin_user
 from .user import job_view, key_view
 
@@ -30,6 +32,7 @@ class MappingUpsert(BaseModel):
     upstream_account_id: int
     upstream_model: str = Field(min_length=1, max_length=150)
     price: Decimal = Field(gt=0, max_digits=14, decimal_places=4)
+    extra_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=4)
     max_concurrency: int = Field(default=2, ge=1, le=100)
     enabled: bool = True
 
@@ -158,11 +161,22 @@ def issue_user_key(user_id: int, payload: KeyIssue, _: User = Depends(admin_user
     if row is None or row.deleted_at or not row.is_active:
         raise HTTPException(404, 'Active user not found')
     raw, prefix, digest = new_api_key()
-    key = ApiKey(user_id=row.id, name=payload.name, prefix=prefix, key_hash=digest)
+    key = ApiKey(user_id=row.id, name=payload.name, prefix=prefix, key_hash=digest,
+                 encrypted_key=encrypt_upstream_key(raw))
     db.add(key)
     db.commit()
     db.refresh(key)
     return {**key_view(key), 'key': raw}
+
+
+@router.get('/users/{user_id}/keys/{key_id}/secret')
+def copy_user_key(user_id: int, key_id: int, _: User = Depends(admin_user),
+                  db: Session = Depends(get_db)) -> dict:
+    key = db.scalar(select(ApiKey).where(ApiKey.id == key_id, ApiKey.user_id == user_id,
+                                         ApiKey.revoked_at.is_(None)))
+    if key is None or not key.encrypted_key:
+        raise HTTPException(404, 'Key cannot be copied; create a new key')
+    return {'key': decrypt_upstream_key(key.encrypted_key)}
 
 
 @router.delete('/users/{user_id}/keys/{key_id}')
@@ -220,6 +234,7 @@ def mappings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> li
                        'upstream_model': row.upstream_model, 'enabled': row.enabled,
                        'max_concurrency': row.max_concurrency, 'revision': row.revision,
                        'price': str(price.amount) if price else None,
+                       'extra_amount': str(price.extra_amount) if price else '0.0000',
                        'billing_mode': price.billing_mode if price else None})
     return result
 
@@ -229,6 +244,11 @@ def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Se
     account = db.get(UpstreamAccount, payload.upstream_account_id)
     if account is None:
         raise HTTPException(404, 'Upstream account not found')
+    extra_amount = payload.extra_amount if payload.extra_amount is not None else (
+        Decimal('0.1000') if account.provider == 'novelai' else Decimal('0')
+    )
+    if account.provider != 'novelai' and extra_amount:
+        raise HTTPException(422, 'Per-generation surcharge is only supported for NovelAI models')
     row = db.scalar(select(ModelMapping).where(ModelMapping.public_name == payload.public_name))
     if row is None:
         row = ModelMapping(public_name=payload.public_name, upstream_model=payload.upstream_model,
@@ -246,9 +266,9 @@ def upsert_mapping(payload: MappingUpsert, _: User = Depends(admin_user), db: Se
         PriceVersion.id.desc(),
     ))
     billing_mode = 'anlas' if account.provider == 'novelai' else 'fixed'
-    if price is None or price.amount != payload.price or price.billing_mode != billing_mode:
+    if price is None or price.amount != payload.price or price.extra_amount != extra_amount or price.billing_mode != billing_mode:
         db.add(PriceVersion(model_mapping_id=row.id, amount=payload.price,
-                            billing_mode=billing_mode))
+                            extra_amount=extra_amount, billing_mode=billing_mode))
     db.commit()
     return {'id': row.id, 'revision': row.revision}
 
@@ -268,6 +288,11 @@ def resolve(job_id: str, payload: Resolution, _: User = Depends(admin_user),
     job = db.get(GenerationJob, job_id)
     if payload.succeeded and job and job.anlas_cost is not None and payload.anlas_charged is None:
         raise HTTPException(422, 'Actual Anlas charge required')
+    if payload.succeeded and job and job.status == JobStatus.UNCERTAIN:
+        try:
+            store_remote_image(job.id, payload.image_url, get_settings().upstream_timeout_seconds)
+        except UpstreamUncertain as exc:
+            raise HTTPException(422, str(exc)) from exc
     result = {'data': [{'url': payload.image_url}],
               'anlas_charged': payload.anlas_charged} if payload.succeeded else None
     resolve_uncertain(db, job_id, result, payload.note)

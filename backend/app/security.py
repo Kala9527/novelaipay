@@ -25,7 +25,7 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def new_api_key() -> tuple[str, str, str]:
-    key = 'nvp_' + secrets.token_urlsafe(32)
+    key = 'pst-' + secrets.token_urlsafe(32)
     return key, key[:12], hash_api_key(key)
 
 
