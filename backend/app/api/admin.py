@@ -1,10 +1,12 @@
 from decimal import Decimal
+from datetime import timedelta
 import uuid
+import re
 from urllib.parse import urlparse
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,7 @@ from ..db import get_db
 from ..config import get_settings
 from ..group_access import can_use_group
 from ..models import ApiKey, GenerationJob, GroupAccount, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, User, utcnow
+from ..registration_email import DEFAULT_TEMPLATE, PLACEHOLDER, RESERVED_VARS, email_ready, registration_settings, send_email
 from ..security import decrypt_upstream_key, encrypt_upstream_key, hash_password, new_api_key
 from ..services import credit_wallet, resolve_uncertain
 from ..upstream import UpstreamUncertain, store_remote_image
@@ -119,6 +122,84 @@ class Resolution(BaseModel):
     image_url: str | None = None
     anlas_charged: int | None = Field(default=None, ge=0)
     note: str | None = Field(default=None, max_length=500)
+
+
+class RegistrationSettingsInput(BaseModel):
+    enabled: bool
+    smtp_host: str = Field(default='', max_length=255)
+    smtp_port: int = Field(default=465, ge=1, le=65535)
+    smtp_security: str = Field(default='ssl', pattern='^(ssl|starttls)$')
+    smtp_username: str = Field(default='', max_length=320)
+    smtp_password: str | None = None
+    sender_email: str = Field(default='', max_length=320)
+    subject: str = Field(default='邮箱注册验证码', min_length=1, max_length=200)
+    html_template: str = Field(default=DEFAULT_TEMPLATE, min_length=1, max_length=30000)
+    template_vars: dict[str, str] = Field(default_factory=dict)
+    code_expiry_minutes: int = Field(default=15, ge=1, le=60)
+
+
+def registration_view(row) -> dict:
+    return {'enabled': row.enabled, 'smtp_host': row.smtp_host, 'smtp_port': row.smtp_port,
+            'smtp_security': row.smtp_security, 'smtp_username': row.smtp_username,
+            'smtp_password_configured': bool(row.smtp_password_encrypted),
+            'sender_email': row.sender_email, 'subject': row.subject,
+            'html_template': row.html_template, 'template_vars': row.template_vars or {},
+            'code_expiry_minutes': row.code_expiry_minutes, 'email_configured': email_ready(row)}
+
+
+@router.get('/registration-settings')
+def get_registration_settings(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    return registration_view(registration_settings(db))
+
+
+@router.put('/registration-settings')
+def save_registration_settings(payload: RegistrationSettingsInput, _: User = Depends(admin_user),
+                               db: Session = Depends(get_db)) -> dict:
+    if '{{code}}' not in payload.html_template and not any(
+        match.group(1) == 'code' for match in PLACEHOLDER.finditer(payload.html_template)
+    ):
+        raise HTTPException(422, 'HTML template must contain {{code}}')
+    if len(payload.template_vars) > 30 or any(
+        key in RESERVED_VARS or not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_]{0,49}', key) or len(value) > 500
+        for key, value in payload.template_vars.items()
+    ):
+        raise HTTPException(422, 'Invalid custom template variables')
+    unknown = {match.group(1) for match in PLACEHOLDER.finditer(payload.html_template)} - RESERVED_VARS - payload.template_vars.keys()
+    if unknown:
+        raise HTTPException(422, f'Undefined template variables: {", ".join(sorted(unknown))}')
+    if payload.sender_email:
+        try:
+            TypeAdapter(EmailStr).validate_python(payload.sender_email)
+        except ValidationError:
+            raise HTTPException(422, 'Invalid sender email')
+    row = registration_settings(db)
+    row.enabled = payload.enabled
+    row.smtp_host = payload.smtp_host.strip()
+    row.smtp_port = payload.smtp_port
+    row.smtp_security = payload.smtp_security
+    row.smtp_username = payload.smtp_username.strip()
+    if payload.smtp_password:
+        row.smtp_password_encrypted = encrypt_upstream_key(payload.smtp_password)
+    row.sender_email = payload.sender_email.strip()
+    row.subject = payload.subject.strip()
+    row.html_template = payload.html_template
+    row.template_vars = payload.template_vars
+    row.code_expiry_minutes = payload.code_expiry_minutes
+    db.commit()
+    return registration_view(row)
+
+
+@router.post('/registration-settings/test')
+def test_registration_email(recipient: EmailStr, _: User = Depends(admin_user),
+                            db: Session = Depends(get_db)) -> dict:
+    row = registration_settings(db)
+    if not email_ready(row):
+        raise HTTPException(422, 'SMTP settings are incomplete')
+    try:
+        send_email(row, str(recipient), '123456', utcnow() + timedelta(minutes=row.code_expiry_minutes))
+    except Exception:
+        raise HTTPException(502, 'Test email could not be sent; check SMTP settings')
+    return {'ok': True}
 
 
 @router.get('/users')

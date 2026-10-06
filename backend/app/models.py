@@ -36,6 +36,31 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class RegistrationSettings(Base):
+    __tablename__ = 'registration_settings'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    smtp_host: Mapped[str] = mapped_column(String(255), default='')
+    smtp_port: Mapped[int] = mapped_column(Integer, default=465)
+    smtp_security: Mapped[str] = mapped_column(String(20), default='ssl')
+    smtp_username: Mapped[str] = mapped_column(String(320), default='')
+    smtp_password_encrypted: Mapped[str | None] = mapped_column(Text)
+    sender_email: Mapped[str] = mapped_column(String(320), default='')
+    subject: Mapped[str] = mapped_column(String(200), default='邮箱注册验证码')
+    html_template: Mapped[str] = mapped_column(Text, default='')
+    template_vars: Mapped[dict] = mapped_column(JSON, default=dict)
+    code_expiry_minutes: Mapped[int] = mapped_column(Integer, default=15)
+
+
+class RegistrationCode(Base):
+    __tablename__ = 'registration_codes'
+    email: Mapped[str] = mapped_column(String(320), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class ApiKey(Base):
     __tablename__ = 'api_keys'
     id: Mapped[int] = mapped_column(primary_key=True)

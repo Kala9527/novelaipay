@@ -43,7 +43,7 @@ class GroupMigrationTest(unittest.TestCase):
                 self.assertEqual(connection.execute('SELECT group_id FROM api_keys WHERE id = 3').fetchone(), (1,))
                 self.assertEqual(connection.execute('SELECT group_id FROM model_mappings WHERE id = 5').fetchone(), (1,))
                 self.assertEqual(connection.execute('SELECT account_id FROM model_routes WHERE model_mapping_id = 5').fetchone(), (7,))
-                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0015',))
+                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0016',))
                 self.assertIn('encrypted_code', {row[1] for row in connection.execute('PRAGMA table_info(redemption_codes)')})
                 self.assertEqual(connection.execute('SELECT is_private FROM upstream_groups WHERE id = 1').fetchone(), (0,))
                 self.assertEqual(connection.execute('SELECT deleted_at FROM upstream_groups WHERE id = 1').fetchone(), (None,))

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { ArrowRight, LockKeyhole, Sparkles } from 'lucide-react'
+import { ArrowRight, LockKeyhole, Mail, Sparkles } from 'lucide-react'
 import { api, post } from '../lib/api'
 import { Notice } from '../components/UI'
 import { PublicHeader } from '../components/PublicHeader'
@@ -10,17 +10,30 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  const [emailConfigured, setEmailConfigured] = useState(false)
+  const [codeExpiry, setCodeExpiry] = useState(15)
+  const [codeSent, setCodeSent] = useState(false)
+  const [cooldown, setCooldown] = useState(0)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => { api<{ registration_enabled: boolean }>('/api/auth/options').then(data => setRegistrationEnabled(data.registration_enabled)).catch(() => {}) }, [])
+  useEffect(() => { api<{ registration_enabled: boolean; email_configured: boolean; code_expiry_minutes: number }>('/api/auth/options').then(data => { setRegistrationEnabled(data.registration_enabled); setEmailConfigured(data.email_configured); setCodeExpiry(data.code_expiry_minutes) }).catch(() => {}) }, [])
+  useEffect(() => { if (cooldown > 0) { const timer = window.setTimeout(() => setCooldown(cooldown - 1), 1000); return () => window.clearTimeout(timer) } }, [cooldown])
+
+  async function sendCode() {
+    setError(''); setBusy(true)
+    try { await post('/api/auth/registration-code', { email }); setCodeSent(true); setCooldown(60) }
+    catch (err) { setError((err as Error).message) }
+    finally { setBusy(false) }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
     setError('')
     try {
-      await post(`/api/auth/${mode === 'login' ? 'login' : 'register'}`, mode === 'login' ? { email, password } : { name, email, password })
+      await post(`/api/auth/${mode === 'login' ? 'login' : 'register'}`, mode === 'login' ? { email, password } : { name, email, password, code })
       onLogin()
     }
     catch (err) { setError((err as Error).message) }
@@ -37,6 +50,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
       <form className="login-form" onSubmit={submit}>
         {mode === 'register' && <label>名称<input required maxLength={80} autoComplete="name" value={name} onChange={e => setName(e.target.value)} placeholder="你的名称" /></label>}
         <label>邮箱地址<input type="email" autoComplete="username" required value={email} onChange={e => setEmail(e.target.value)} placeholder="name@example.com" /></label>
+        {mode === 'register' && <><div className="registration-code-row"><label>邮箱验证码<input required inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" value={code} onChange={e => setCode(e.target.value)} placeholder="6 位验证码" /></label><button type="button" className="button secondary" disabled={busy || cooldown > 0 || !emailConfigured || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)} onClick={sendCode}><Mail size={15} />{cooldown > 0 ? `${cooldown}s` : '发送验证码'}</button></div>{codeSent && <span className="registration-hint">验证码已发送，{codeExpiry} 分钟内有效。</span>}{!emailConfigured && <span className="registration-hint">管理员尚未配置通知邮箱，暂时无法注册。</span>}</>}
         <label>密码<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={mode === 'register' ? 12 : 8} value={password} onChange={e => setPassword(e.target.value)} placeholder={mode === 'register' ? '至少 12 个字符' : '输入密码'} /></label>
         {error && <Notice text={error} error />}
         <button className="button primary full" disabled={busy}>{busy ? '请稍候...' : mode === 'login' ? '登录' : '创建账户'}<ArrowRight size={17} /></button>

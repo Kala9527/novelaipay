@@ -1,4 +1,8 @@
 import secrets
+import hmac
+import smtplib
+from datetime import timedelta
+from cryptography.fernet import InvalidToken
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
@@ -7,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..config import get_business_config, get_settings
 from ..db import get_db
-from ..models import User
+from ..models import RegistrationCode, User, utcnow
+from ..registration_email import code_digest, email_ready, new_code, registration_settings, send_email
 from ..security import create_session, hash_password, verify_password
 from .deps import csrf_user, current_user
 
@@ -24,6 +29,11 @@ class Registration(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     email: EmailStr
     password: str = Field(min_length=12, max_length=200)
+    code: str = Field(pattern=r'^\d{6}$')
+
+
+class CodeRequest(BaseModel):
+    email: EmailStr
 
 
 class ProfileUpdate(BaseModel):
@@ -50,23 +60,67 @@ def set_auth_cookies(response: Response, user: User) -> None:
 
 
 @router.get('/options')
-def options() -> dict:
-    return {'registration_enabled': get_business_config().registration.enabled}
+def options(db: Session = Depends(get_db)) -> dict:
+    settings = registration_settings(db)
+    return {'registration_enabled': settings.enabled, 'email_configured': email_ready(settings),
+            'code_expiry_minutes': settings.code_expiry_minutes}
+
+
+@router.post('/registration-code')
+def request_registration_code(payload: CodeRequest, db: Session = Depends(get_db)) -> dict:
+    settings = registration_settings(db)
+    if not settings.enabled:
+        raise HTTPException(403, 'Registration disabled')
+    if not email_ready(settings):
+        raise HTTPException(503, 'Registration email is not configured')
+    email = payload.email.lower()
+    if db.scalar(select(User.id).where(User.email == email)):
+        raise HTTPException(409, 'Email already registered')
+    now = utcnow()
+    existing = db.get(RegistrationCode, email)
+    if existing and existing.sent_at.replace(tzinfo=existing.sent_at.tzinfo or now.tzinfo) > now - timedelta(seconds=60):
+        raise HTTPException(429, 'Please wait 60 seconds before requesting another code')
+    code = new_code()
+    expires_at = now + timedelta(minutes=settings.code_expiry_minutes)
+    try:
+        send_email(settings, email, code, expires_at)
+    except (OSError, smtplib.SMTPException, ValueError, InvalidToken):
+        raise HTTPException(502, 'Verification email could not be sent')
+    if existing:
+        existing.code_hash = code_digest(email, code)
+        existing.expires_at = expires_at
+        existing.sent_at = now
+        existing.attempts = 0
+    else:
+        db.add(RegistrationCode(email=email, code_hash=code_digest(email, code),
+                                expires_at=expires_at, sent_at=now, attempts=0))
+    db.commit()
+    return {'ok': True}
 
 
 @router.post('/register')
 def register(payload: Registration, response: Response, db: Session = Depends(get_db)) -> dict:
-    registration = get_business_config().registration
-    if not registration.enabled:
+    settings = registration_settings(db)
+    if not settings.enabled:
         raise HTTPException(403, 'Registration disabled')
     if not payload.name.strip():
         raise HTTPException(422, 'Name required')
-    if db.scalar(select(User).where(User.email == payload.email.lower())):
+    email = payload.email.lower()
+    if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(409, 'Email already registered')
-    user = User(email=payload.email.lower(), display_name=payload.name.strip(),
+    issued = db.get(RegistrationCode, email)
+    now = utcnow()
+    if not issued or issued.expires_at.replace(tzinfo=issued.expires_at.tzinfo or now.tzinfo) <= now or issued.attempts >= 5:
+        raise HTTPException(400, 'Verification code expired or unavailable')
+    if not hmac.compare_digest(issued.code_hash, code_digest(email, payload.code)):
+        issued.attempts += 1
+        db.commit()
+        raise HTTPException(400, 'Invalid verification code')
+    user = User(email=email, display_name=payload.name.strip(),
                 password_hash=hash_password(payload.password),
-                max_concurrency=registration.default_max_concurrency)
+                max_concurrency=get_business_config().registration.default_max_concurrency)
     db.add(user)
+    db.delete(issued)
     db.commit()
     db.refresh(user)
     set_auth_cookies(response, user)

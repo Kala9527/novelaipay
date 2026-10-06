@@ -34,7 +34,7 @@ from app import db
 from app.bootstrap import main as bootstrap_admin
 from app.config import AdminConfig, RegistrationConfig, get_business_config
 from app.main import app
-from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, RedemptionCode, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
+from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, RedemptionCode, RegistrationCode, RegistrationSettings, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
 from app.models import User
 from app.security import verify_password
 from app.services import claim_job, recover_expired
@@ -43,6 +43,7 @@ from app.api.tavern import normalize_request
 from app.novelai import ImageParameters, generation_payload
 from app.upstream import OpenAIImageAdapter
 from app.security import encrypt_upstream_key
+from app.registration_email import render_template
 import base64
 
 
@@ -70,6 +71,72 @@ class FlowTest(unittest.TestCase):
 
     def admin_patch(self, path, payload):
         return self.client.patch(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+
+    def register(self, name, email, password):
+        with db.SessionLocal.begin() as session:
+            row = session.get(RegistrationSettings, 1)
+            if row is None:
+                row = RegistrationSettings(id=1, enabled=True, html_template='{{code}}')
+                session.add(row)
+            row.smtp_host = 'smtp.example.com'
+            row.smtp_username = 'sender@example.com'
+            row.smtp_password_encrypted = encrypt_upstream_key('test-password')
+            row.sender_email = 'sender@example.com'
+        with patch('app.api.auth.send_email'), patch('app.api.auth.new_code', return_value='123456'):
+            sent = self.client.post('/api/auth/registration-code', json={'email': email})
+        self.assertEqual(sent.status_code, 200, sent.text)
+        return self.client.post('/api/auth/register', json={
+            'name': name, 'email': email, 'password': password, 'code': '123456',
+        })
+
+    def test_registration_email_settings_and_verification(self):
+        self.login('admin@example.com', 'long-test-password')
+        headers = {'X-CSRF-Token': self.client.cookies['nvp_csrf']}
+        settings = self.client.get('/api/admin/registration-settings', headers=headers).json()
+        payload = {**settings, 'smtp_host': 'smtp.qq.com', 'smtp_username': 'sender@qq.com',
+                   'smtp_password': 'device-code', 'sender_email': 'sender@qq.com',
+                   'html_template': '<p>{{code}} {{site_name}} {{expires_at}}</p>',
+                   'template_vars': {'site_name': '<NovelAI>'}, 'code_expiry_minutes': 15}
+        self.assertEqual(self.client.put('/api/admin/registration-settings', json={
+            **payload, 'html_template': '<p>missing code</p>',
+        }, headers=headers).status_code, 422)
+        saved = self.client.put('/api/admin/registration-settings', json=payload, headers=headers)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertTrue(saved.json()['email_configured'])
+        self.assertNotIn('device-code', str(saved.json()))
+        with patch('app.api.admin.send_email') as sender:
+            test_mail = self.admin_post('/api/admin/registration-settings/test?recipient=admin@example.com', {})
+            self.assertEqual(test_mail.status_code, 200, test_mail.text)
+            sender.assert_called_once()
+        with db.SessionLocal() as session:
+            row = session.get(RegistrationSettings, 1)
+            self.assertNotIn('device-code', row.smtp_password_encrypted)
+            self.assertIn('&lt;NovelAI&gt;', render_template(row, 'new@example.com', '123456', utcnow()))
+        self.client.cookies.clear()
+        with patch('app.api.auth.send_email') as sender, patch('app.api.auth.new_code', return_value='123456'):
+            sent = self.client.post('/api/auth/registration-code', json={'email': 'new@example.com'})
+            self.assertEqual(sent.status_code, 200, sent.text)
+            self.assertEqual(sender.call_count, 1)
+        self.assertEqual(self.client.post('/api/auth/registration-code', json={
+            'email': 'new@example.com',
+        }).status_code, 429)
+        with db.SessionLocal.begin() as session:
+            issued = session.get(RegistrationCode, 'new@example.com')
+            issued.expires_at = utcnow() - timedelta(seconds=1)
+        registration = {'name': 'New User', 'email': 'new@example.com',
+                        'password': 'strong-user-password', 'code': '000000'}
+        self.assertEqual(self.client.post('/api/auth/register', json=registration).status_code, 400)
+        with db.SessionLocal.begin() as session:
+            issued = session.get(RegistrationCode, 'new@example.com')
+            issued.expires_at = utcnow() + timedelta(minutes=15)
+        self.assertEqual(self.client.post('/api/auth/register', json={
+            **registration, 'code': '123456',
+        }).status_code, 200)
+        self.assertEqual(self.client.post('/api/auth/register', json={
+            **registration, 'code': '123456',
+        }).status_code, 409)
+        with db.SessionLocal() as session:
+            self.assertIsNone(session.get(RegistrationCode, 'new@example.com'))
 
     def test_redemption_codes_and_generated_credit_reference(self):
         self.login('admin@example.com', 'long-test-password')
@@ -133,9 +200,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/billing?kind=redemption').json()['ledger_total'], 1)
 
     def test_profile_and_password_reset(self):
-        registered = self.client.post('/api/auth/register', json={
-            'name': 'First Name', 'email': 'profile@example.com', 'password': 'initial-password-123',
-        })
+        registered = self.register('First Name', 'profile@example.com', 'initial-password-123')
         self.assertEqual(registered.status_code, 200, registered.text)
         user_id = registered.json()['id']
         old_session = self.client.cookies['nvp_session']
@@ -205,9 +270,7 @@ class FlowTest(unittest.TestCase):
         plaza = self.client.get('/models')
         self.assertEqual(plaza.status_code, 200, plaza.text)
         self.assertIn('<div id="root"></div>', plaza.text)
-        registered = self.client.post('/api/auth/register', json={
-            'name': 'Catalog User', 'email': 'catalog@example.com', 'password': 'catalog-password-123',
-        })
+        registered = self.register('Catalog User', 'catalog@example.com', 'catalog-password-123')
         self.assertEqual(registered.status_code, 200, registered.text)
         self.assertEqual(len(self.client.get('/api/public/models').json()), 1)
         with db.SessionLocal.begin() as session:
@@ -218,10 +281,7 @@ class FlowTest(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual([row['name'] for row in self.client.get('/api/public/models').json()],
                          ['public-model'])
-        self.client.post('/api/auth/register', json={
-            'name': 'Unassigned User', 'email': 'unassigned@example.com',
-            'password': 'unassigned-password-123',
-        })
+        self.register('Unassigned User', 'unassigned@example.com', 'unassigned-password-123')
         self.assertEqual([row['name'] for row in self.client.get('/api/public/models').json()],
                          ['public-model'])
 
@@ -257,9 +317,7 @@ class FlowTest(unittest.TestCase):
         }).status_code, 422)
         self.client.cookies.clear()
         self.assertEqual([row['title'] for row in self.client.get('/api/public/announcements').json()], ['Revised'])
-        self.client.post('/api/auth/register', json={
-            'name': 'Notice User', 'email': 'notices@example.com', 'password': 'notice-password-123',
-        })
+        self.register('Notice User', 'notices@example.com', 'notice-password-123')
         self.assertEqual({row['title'] for row in self.client.get('/api/public/announcements').json()},
                          {'Revised', 'Private'})
         self.assertEqual(self.admin_patch(f'/api/admin/announcements/{public["id"]}', {
@@ -282,16 +340,22 @@ class FlowTest(unittest.TestCase):
             self.assertTrue(verify_password('long-test-password', administrators[0].password_hash))
 
     def test_registration_user_management_and_key_distribution(self):
-        self.assertEqual(self.client.get('/api/auth/options').json(), {'registration_enabled': True})
-        disabled = get_business_config().model_copy(update={'registration': RegistrationConfig(enabled=False)})
-        with patch('app.api.auth.get_business_config', return_value=disabled):
-            self.assertEqual(self.client.get('/api/auth/options').json(), {'registration_enabled': False})
-            self.assertEqual(self.client.post('/api/auth/register', json={
-                'name': 'Blocked', 'email': 'blocked@example.com', 'password': 'strong-user-password',
-            }).status_code, 403)
-        registered = self.client.post('/api/auth/register', json={
-            'name': 'Registered User', 'email': 'registered@example.com', 'password': 'strong-user-password',
-        })
+        self.assertTrue(self.client.get('/api/auth/options').json()['registration_enabled'])
+        self.login('admin@example.com', 'long-test-password')
+        settings = self.client.get('/api/admin/registration-settings', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()
+        disabled = self.client.put('/api/admin/registration-settings', json={**settings, 'enabled': False},
+                                   headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertFalse(self.client.get('/api/auth/options').json()['registration_enabled'])
+        self.assertEqual(self.client.post('/api/auth/registration-code', json={
+            'email': 'blocked@example.com',
+        }).status_code, 403)
+        self.client.put('/api/admin/registration-settings', json={**settings, 'enabled': True},
+                        headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.client.cookies.clear()
+        registered = self.register('Registered User', 'registered@example.com', 'strong-user-password')
         self.assertEqual(registered.status_code, 200, registered.text)
         user_id = registered.json()['id']
         self.assertEqual(registered.json()['role'], 'user')
