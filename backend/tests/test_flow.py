@@ -43,7 +43,7 @@ from app.api.tavern import normalize_request
 from app.novelai import ImageParameters, generation_payload
 from app.upstream import OpenAIImageAdapter
 from app.security import encrypt_upstream_key
-from app.registration_email import render_template
+from app.registration_email import DEFAULT_TEMPLATE, LEGACY_TEMPLATE, registration_settings, render_template
 import base64
 
 
@@ -71,6 +71,23 @@ class FlowTest(unittest.TestCase):
 
     def admin_patch(self, path, payload):
         return self.client.patch(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+
+    def test_default_registration_email_template(self):
+        with db.SessionLocal.begin() as session:
+            row = registration_settings(session)
+            self.assertEqual(row.html_template, DEFAULT_TEMPLATE)
+            row.html_template = LEGACY_TEMPLATE.replace('\n', '\r\n')
+        with db.SessionLocal.begin() as session:
+            row = registration_settings(session)
+            self.assertEqual(row.html_template, DEFAULT_TEMPLATE)
+            rendered = render_template(row, 'new@example.com', '123456', utcnow())
+            self.assertIn('YunZhanCloud', rendered)
+            self.assertIn('123456', rendered)
+            self.assertIn('15 分钟内有效', rendered)
+            self.assertNotIn('{{code}}', rendered)
+            row.html_template = '<p>{{code}}</p>'
+        with db.SessionLocal() as session:
+            self.assertEqual(registration_settings(session).html_template, '<p>{{code}}</p>')
 
     def register(self, name, email, password):
         with db.SessionLocal.begin() as session:
