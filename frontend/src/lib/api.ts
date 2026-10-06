@@ -14,6 +14,24 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 }
 
 export const post = <T>(path: string, data: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(data) })
+
+export async function downloadCsv(path: string, filename: string) {
+  const headers = new Headers()
+  if (csrfToken()) headers.set('X-CSRF-Token', csrfToken())
+  const response = await fetch(path, { headers, credentials: 'same-origin' })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(typeof body.detail === 'string' ? body.detail : `导出失败 (${response.status})`)
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 export const formatMoney = (value: string | number) => `¥${Number(value).toFixed(2)}`
 export const formatDate = (value: string) => new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
 export const beijingInput = (value: string | null) => value ? new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`).toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai', hour12: false }).slice(0, 16).replace(' ', 'T') : ''

@@ -19,7 +19,7 @@ class PrepareDatabaseTest(unittest.TestCase):
                                         cwd=backend, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             with closing(sqlite3.connect(database)) as connection:
-                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0014',))
+                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0015',))
                 columns = {row[1] for row in connection.execute('PRAGMA table_info(upstream_groups)')}
                 self.assertIn('is_private', columns)
                 self.assertIn('deleted_at', columns)

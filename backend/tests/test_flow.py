@@ -1,4 +1,5 @@
 import hashlib
+import csv
 import hmac
 import json
 import io
@@ -33,7 +34,7 @@ from app import db
 from app.bootstrap import main as bootstrap_admin
 from app.config import AdminConfig, RegistrationConfig, get_business_config
 from app.main import app
-from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
+from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, RedemptionCode, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
 from app.models import User
 from app.security import verify_password
 from app.services import claim_job, recover_expired
@@ -93,11 +94,34 @@ class FlowTest(unittest.TestCase):
             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()
         self.assertEqual(len(listed), 2)
         self.assertNotIn(codes[0], str(listed))
+        secret = self.client.get(f"/api/admin/redemption-codes/{listed[1]['id']}/secret",
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertEqual(secret.json()['code'], codes[0])
+        exported = self.client.get('/api/admin/redemption-codes/export',
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(exported.encoding, 'utf-8')
+        self.assertEqual(len(list(csv.reader(io.StringIO(exported.content.decode('utf-8-sig'))))), 3)
+        self.assertIn(codes[0], exported.text)
+        selected_export = self.client.get(f"/api/admin/redemption-codes/export?ids={listed[1]['id']}",
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertIn(codes[0], selected_export.text)
+        self.assertNotIn(codes[1], selected_export.text)
+        with db.SessionLocal() as session:
+            legacy = session.get(RedemptionCode, listed[1]['id'])
+            legacy.encrypted_code = None
+            session.commit()
+        legacy_secret = self.client.get(f"/api/admin/redemption-codes/{listed[1]['id']}/secret",
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+        self.assertEqual(legacy_secret.status_code, 404)
+        self.assertFalse(self.client.get('/api/admin/redemption-codes',
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()[1]['can_copy'])
         self.assertEqual(self.client.delete(f"/api/admin/redemption-codes/{listed[0]['id']}",
             headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 200)
         self.login('redeemer@example.com', 'user-password-123')
         self.assertEqual(self.admin_post('/api/admin/redemption-codes',
             {'amount': '1', 'count': 1}).status_code, 403)
+        self.assertEqual(self.client.get('/api/admin/redemption-codes/export').status_code, 403)
         used = self.admin_post('/api/redemption-codes/redeem', {'code': codes[0]})
         self.assertEqual(used.status_code, 200, used.text)
         self.assertEqual(used.json()['balance'], '3.1001')
@@ -782,12 +806,21 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(all(row['user_name'] == 'Usage User' for row in filtered['items']))
         self.assertEqual(self.client.get('/api/usage?limit=1&offset=1').json()['total'], 3)
         self.assertEqual(self.client.get('/api/usage?search=' + jobs[0][:8]).json()['total'], 1)
+        usage_csv = self.client.get(f'/api/usage/export?user_id={user["id"]}&status=succeeded')
+        self.assertEqual(usage_csv.status_code, 200, usage_csv.text)
+        self.assertEqual(len(list(csv.reader(io.StringIO(usage_csv.content.decode('utf-8-sig'))))), 3)
+        selected_csv = self.client.get(f'/api/usage/export?ids={jobs[0]}')
+        self.assertIn(jobs[0], selected_csv.text)
+        self.assertNotIn(jobs[1], selected_csv.text)
         with db.SessionLocal() as session:
             self.assertTrue(all(session.get(GenerationJob, job_id).result is None for job_id in jobs))
 
         self.client.cookies.clear()
         self.login('usage@example.com', 'usage-password-123')
         self.assertEqual(self.client.get('/api/usage').json()['total'], 2)
+        scoped_csv = self.client.get(f'/api/usage/export?ids={jobs[0]}&ids={jobs[2]}')
+        self.assertNotIn(jobs[0], scoped_csv.text)
+        self.assertIn(jobs[2], scoped_csv.text)
         self.assertEqual(self.client.get('/api/usage/models').json(), ['usage-model'])
         self.assertEqual(self.client.get(f'/api/usage?user_id={admin_id}').json()['total'], 2)
         self.assertEqual(self.client.post('/api/usage/delete', json={'ids': [jobs[0]]},
@@ -1119,6 +1152,12 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(billing['balance'], '2.0000')
         self.assertEqual(billing['reserved'], '0.0000')
         self.assertEqual(len(billing['usage']), 1)
+        consumption_csv = self.client.get('/api/billing/consumption/export')
+        self.assertEqual(consumption_csv.status_code, 200, consumption_csv.text)
+        self.assertIn(first.json()['id'], consumption_csv.text)
+        self.assertEqual(len(list(csv.reader(io.StringIO(consumption_csv.content.decode('utf-8-sig'))))), 2)
+        self.assertEqual(len(list(csv.reader(io.StringIO(self.client.get(
+            '/api/billing/consumption/export?ids=999').content.decode('utf-8-sig'))))), 1)
 
         body = json.dumps({'provider': 'test', 'transaction_id': 'tx-1',
                            'user_id': user_id, 'amount': '10.0000'}).encode()

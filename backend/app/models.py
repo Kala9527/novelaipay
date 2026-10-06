@@ -194,6 +194,7 @@ class RedemptionCode(Base):
     __tablename__ = 'redemption_codes'
     id: Mapped[int] = mapped_column(primary_key=True)
     code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    encrypted_code: Mapped[str | None] = mapped_column(Text)
     prefix: Mapped[str] = mapped_column(String(12))
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
     created_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
