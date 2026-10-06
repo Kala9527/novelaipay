@@ -8,5 +8,6 @@ import './studio.css'
 import './features.css'
 import './refresh.css'
 import './welcome-carousel.css'
+import './api-guide.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><PreferencesProvider><BrowserRouter><App /></BrowserRouter></PreferencesProvider></React.StrictMode>)

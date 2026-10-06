@@ -1,5 +1,9 @@
+import { useEffect, useState } from 'react'
 import { PageHeader } from '../components/UI'
 import { usePreferences } from '../lib/preferences'
+
+const sectionIds = ['connection', 'asynchronous', 'editing', 'inpainting', 'references', 'tavern', 'compatibility'] as const
+const tocTitles = { zh: '本页目录', en: 'On this page', ja: 'このページ' }
 
 const content = {
   zh: {
@@ -16,17 +20,35 @@ const content = {
 export function ApiGuidePage() {
   const { locale, t } = usePreferences()
   const text = content[locale]
+  const [activeSection, setActiveSection] = useState<string>(sectionIds[0])
+  useEffect(() => {
+    const update = () => {
+      let current: string = sectionIds[0]
+      for (const id of sectionIds) {
+        if ((document.getElementById(`guide-${id}`)?.getBoundingClientRect().top ?? Infinity) <= 190) current = id
+      }
+      if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2) current = sectionIds[sectionIds.length - 1]
+      setActiveSection(current)
+    }
+    const target = document.getElementById(window.location.hash.slice(1))
+    if (target?.classList.contains('guide-section')) target.scrollIntoView()
+    update()
+    window.addEventListener('scroll', update, { passive: true })
+    return () => window.removeEventListener('scroll', update)
+  }, [])
   const origin = window.location.origin
   const generation = [`POST ${origin}/v1/images/generations`, 'Authorization: Bearer pst-your-key', 'Idempotency-Key: unique-value-for-this-job', 'Content-Type: application/json', '', '{', '  "model": "model-name",', '  "prompt": "An illustrated city at night",', '  "size": "1024x1024",', '  "n": 1', '}'].join('\n')
   const edit = [`POST ${origin}/v1/images/generations`, 'Authorization: Bearer pst-your-key', 'Idempotency-Key: another-unique-value', 'Content-Type: application/json', '', '{', '  "model": "model-name",', '  "prompt": "Change the background to a rainy night",', '  "size": "1024x1024",', '  "parameters": {', '    "action": "img2img",', '    "image": "data:image/png;base64,<image-base64>",', '    "strength": 0.55,', '    "noise": 0', '  }', '}'].join('\n')
   const infill = [`POST ${origin}/v1/images/generations`, 'Authorization: Bearer pst-your-key', 'Idempotency-Key: another-unique-value', 'Content-Type: application/json', '', '{', '  "model": "model-name",', '  "prompt": "Change the view outside the window to snow",', '  "size": "1024x1024",', '  "parameters": {', '    "action": "infill",', '    "image": "data:image/png;base64,<image-base64>",', '    "mask": "data:image/png;base64,<mask-base64>",', '    "strength": 0.7,', '    "inpaint_img2img_strength": 0.8', '  }', '}'].join('\n')
   return <div className="page guide-page"><PageHeader title={t('guide')} subtitle={text.subtitle} />
-    <section className="guide-section"><h2>{text.connection}</h2><dl className="detail-grid"><dt>{text.base}</dt><dd><code>{origin}</code></dd><dt>{text.auth}</dt><dd>{text.authBody} <code>Authorization: Bearer pst-...</code></dd><dt>{text.model}</dt><dd>{text.modelBody}</dd></dl><p>{text.hostHint}</p></section>
-    <section className="guide-section"><h2>{text.asynchronous}</h2><p>{text.asyncBody}</p><pre>{generation}</pre><pre>{[`GET ${origin}/v1/jobs/{job-id}`, `GET ${origin}/v1/jobs/{job-id}/image`].join('\n')}</pre></section>
-    <section className="guide-section"><h2>{text.editing}</h2><p>{text.editingBody}</p><pre>{edit}</pre></section>
-    <section className="guide-section"><h2>{text.inpainting}</h2><p>{text.inpaintingBody}</p><pre>{infill}</pre><p>{text.imageLimits}</p></section>
-    <section className="guide-section"><h2>{text.references}</h2><p>{text.referencesBody}</p><pre>{['"parameters": {', '  "action": "generate",', '  "references": [{', '    "image": "data:image/png;base64,<reference-base64>",', '    "information_extracted": 1,', '    "strength": 0.6', '  }]', '}'].join('\n')}</pre></section>
-    <section className="guide-section"><h2>{text.tavern}</h2><dl className="detail-grid"><dt>{text.method}</dt><dd>{text.methodValue}</dd><dt>{text.proxy}</dt><dd><code>{origin}/genarate</code></dd><dt>{text.tavernKey}</dt><dd>{text.tavernKeyBody}</dd><dt>{text.tavernModel}</dt><dd>{text.tavernModelBody}</dd></dl><p>{text.tavernBody}</p></section>
-    <section className="guide-section"><h2>{text.compatibility}</h2><pre>{[`GET ${origin}/v1/models`, 'Authorization: Bearer pst-your-key', '', `POST ${origin}/genarate`, 'Authorization: Bearer pst-your-key', 'Content-Type: application/json', '', '{"model":"model-name","prompt":"image description","size":"1024x1024"}'].join('\n')}</pre><p>{text.billingNote}</p></section>
+    <div className="guide-layout"><div className="guide-body">
+      <section className="guide-section" id="guide-connection"><h2>{text.connection}</h2><dl className="detail-grid"><dt>{text.base}</dt><dd><code>{origin}</code></dd><dt>{text.auth}</dt><dd>{text.authBody} <code>Authorization: Bearer pst-...</code></dd><dt>{text.model}</dt><dd>{text.modelBody}</dd></dl><p>{text.hostHint}</p></section>
+      <section className="guide-section" id="guide-asynchronous"><h2>{text.asynchronous}</h2><p>{text.asyncBody}</p><pre>{generation}</pre><pre>{[`GET ${origin}/v1/jobs/{job-id}`, `GET ${origin}/v1/jobs/{job-id}/image`].join('\n')}</pre></section>
+      <section className="guide-section" id="guide-editing"><h2>{text.editing}</h2><p>{text.editingBody}</p><pre>{edit}</pre></section>
+      <section className="guide-section" id="guide-inpainting"><h2>{text.inpainting}</h2><p>{text.inpaintingBody}</p><pre>{infill}</pre><p>{text.imageLimits}</p></section>
+      <section className="guide-section" id="guide-references"><h2>{text.references}</h2><p>{text.referencesBody}</p><pre>{['"parameters": {', '  "action": "generate",', '  "references": [{', '    "image": "data:image/png;base64,<reference-base64>",', '    "information_extracted": 1,', '    "strength": 0.6', '  }]', '}'].join('\n')}</pre></section>
+      <section className="guide-section" id="guide-tavern"><h2>{text.tavern}</h2><dl className="detail-grid"><dt>{text.method}</dt><dd>{text.methodValue}</dd><dt>{text.proxy}</dt><dd><code>{origin}/genarate</code></dd><dt>{text.tavernKey}</dt><dd>{text.tavernKeyBody}</dd><dt>{text.tavernModel}</dt><dd>{text.tavernModelBody}</dd></dl><p>{text.tavernBody}</p></section>
+      <section className="guide-section" id="guide-compatibility"><h2>{text.compatibility}</h2><pre>{[`GET ${origin}/v1/models`, 'Authorization: Bearer pst-your-key', '', `POST ${origin}/genarate`, 'Authorization: Bearer pst-your-key', 'Content-Type: application/json', '', '{"model":"model-name","prompt":"image description","size":"1024x1024"}'].join('\n')}</pre><p>{text.billingNote}</p></section>
+    </div><nav className="guide-toc" aria-label={tocTitles[locale]}><span className="guide-toc-title">{tocTitles[locale]}</span><div className="guide-toc-links">{sectionIds.map((id, index) => <a key={id} href={`#guide-${id}`} className={activeSection === id ? 'active' : ''} aria-current={activeSection === id ? 'location' : undefined} onClick={() => setActiveSection(id)}><span>{String(index + 1).padStart(2, '0')}</span>{text[id]}</a>)}</div></nav></div>
   </div>
 }
