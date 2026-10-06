@@ -1,0 +1,17 @@
+[Unit]
+Description=Novelaipay API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=novelaipay
+Group=novelaipay
+WorkingDirectory=/opt/apps/novelaipay/backend
+ExecStart=/opt/apps/novelaipay/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8009 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

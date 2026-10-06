@@ -1,0 +1,30 @@
+.login-intro{min-height:620px;padding:30px 0 24px;overflow:visible}
+.login-intro h2{font-size:clamp(43px,4.7vw,63px)}
+.mirror-carousel{width:100%;height:320px;margin-top:28px;position:relative;flex:none;user-select:none}
+.mirror-stage{position:relative;height:274px;overflow:hidden;perspective:1000px;isolation:isolate}
+.mirror-stage-line{position:absolute;left:4%;right:4%;height:1px;background:var(--line);opacity:.8;pointer-events:none}
+.mirror-stage-line-top{top:9px}.mirror-stage-line-bottom{bottom:21px}
+.mirror-slide{position:absolute;top:18px;left:50%;width:39%;height:237px;transition:transform 850ms cubic-bezier(.2,.75,.22,1),opacity 850ms ease,filter 850ms ease;transform-style:preserve-3d;will-change:transform;z-index:1}
+.mirror-slide-active{transform:translateX(-50%) translateY(-4px) scale(1.08);z-index:3;opacity:1;filter:saturate(1.08)}
+.mirror-slide-previous{transform:translateX(-126%) rotateY(19deg) scale(.84);z-index:2;opacity:.72;filter:saturate(.75)}
+.mirror-slide-next{transform:translateX(26%) rotateY(-19deg) scale(.84);z-index:2;opacity:.72;filter:saturate(.75)}
+.mirror-image{height:182px;position:relative;overflow:hidden;border:1px solid #ffffff6b;border-radius:4px;background:#192633;box-shadow:0 15px 35px #0b182b42}
+.mirror-image img,.mirror-reflection img{display:block;width:100%;height:100%;object-fit:cover}
+.mirror-image img{transition:transform 5s linear}.mirror-slide-active .mirror-image img{transform:scale(1.12)}
+.mirror-image:after{content:'';position:absolute;inset:0;background:linear-gradient(105deg,transparent 32%,#ffffff30 47%,transparent 61%);transform:translateX(-130%);pointer-events:none}
+.mirror-slide-active .mirror-image:after{animation:mirror-sheen 5s ease-in-out infinite}
+.mirror-index{position:absolute;left:10px;bottom:8px;color:#fff;font:700 11px ui-monospace,SFMono-Regular,Consolas,monospace;text-shadow:0 1px 5px #000b}
+.mirror-reflection{height:47px;margin-top:7px;transform:scaleY(-1);transform-origin:center top;opacity:.38;mask-image:linear-gradient(#000b,transparent);-webkit-mask-image:linear-gradient(#000b,transparent);overflow:hidden;filter:blur(1px) brightness(1.3)}
+.mirror-reflection img{height:182px;object-position:center bottom!important}
+.mirror-controls{height:40px;display:flex;align-items:center;justify-content:space-between;gap:15px;padding:0 12px}
+.mirror-pagination,.mirror-actions{display:flex;align-items:center;gap:5px}
+.mirror-pagination button{position:relative;min-width:38px;height:32px;display:flex;align-items:center;justify-content:center;border:0;border-bottom:2px solid var(--line);background:transparent;color:var(--muted);font:700 11px ui-monospace,SFMono-Regular,Consolas,monospace}
+.mirror-pagination button.active{border-bottom-color:var(--accent);color:var(--accent)}
+.mirror-carousel.is-paused .mirror-slide-active .mirror-image:after{animation-play-state:paused}
+.mirror-pagination button:hover{color:var(--accent)}
+.mirror-actions .icon-button{width:30px;height:30px;color:var(--muted)}
+.mirror-actions .icon-button:hover{color:var(--accent)}
+@keyframes mirror-sheen{0%,16%{transform:translateX(-130%)}65%,100%{transform:translateX(160%)}}
+@media(max-width:900px){.login-intro{min-height:0;padding:36px 0 12px}.mirror-carousel{height:285px;margin-top:26px}.mirror-stage{height:244px}.mirror-slide{height:209px}.mirror-image{height:161px}.mirror-reflection{height:40px}.mirror-reflection img{height:161px}}
+@media(max-width:580px){.login-intro{padding:25px 0 6px}.login-intro h2{font-size:34px}.mirror-carousel{height:175px;margin-top:16px}.mirror-stage{height:133px}.mirror-stage-line-top{top:4px}.mirror-stage-line-bottom{bottom:6px}.mirror-slide{top:9px;width:44%;height:123px}.mirror-slide-previous{transform:translateX(-127%) rotateY(16deg) scale(.82)}.mirror-slide-next{transform:translateX(27%) rotateY(-16deg) scale(.82)}.mirror-image{height:98px}.mirror-reflection{height:20px;margin-top:4px}.mirror-reflection img{height:98px}.mirror-index{font-size:9px}.mirror-controls{height:40px;padding:0 2px}.mirror-pagination button{min-width:38px;height:36px}.mirror-actions .icon-button{width:36px;height:36px}}
+@media(prefers-reduced-motion:reduce){.mirror-slide,.mirror-image img{transition:none}.mirror-slide-active .mirror-image:after{animation:none}}

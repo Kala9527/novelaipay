@@ -7,6 +7,7 @@ from pathlib import Path
 from .models import GenerationJob, UpstreamAccount
 from .security import decrypt_upstream_key
 from .novelai import ImageParameters, generation_payload
+from .proxy import request as upstream_request
 
 
 class UpstreamUncertain(Exception):
@@ -16,9 +17,12 @@ class UpstreamUncertain(Exception):
 IMAGE_DIR = Path(__file__).resolve().parents[2] / 'data' / 'images'
 
 
-def store_remote_image(job_id: str, image_url: str, timeout_seconds: int) -> Path:
+def store_remote_image(job_id: str, image_url: str, timeout_seconds: int,
+                       account: UpstreamAccount | None = None) -> Path:
     try:
-        response = httpx.get(image_url, timeout=timeout_seconds, follow_redirects=True)
+        options = {'timeout': timeout_seconds, 'follow_redirects': True}
+        response = (upstream_request(account, 'GET', image_url, **options) if account else
+                    httpx.get(image_url, **options))
         response.raise_for_status()
     except (httpx.HTTPError, ValueError) as exc:
         raise UpstreamUncertain('Upstream image could not be retrieved; check before settlement') from exc
@@ -39,7 +43,7 @@ class OpenAIImageAdapter:
     def generate(self, job: GenerationJob) -> dict:
         url = self.account.base_url.rstrip('/') + '/images/generations'
         try:
-            response = httpx.post(
+            response = upstream_request(self.account, 'POST',
                 url,
                 headers={'Authorization': 'Bearer ' + decrypt_upstream_key(self.account.encrypted_key)},
                 json={'model': job.upstream_model, 'prompt': job.prompt, 'size': job.size,
@@ -55,7 +59,7 @@ class OpenAIImageAdapter:
         images = data.get('data') if isinstance(data, dict) else None
         if not isinstance(images, list) or not images or not isinstance(images[0], dict) or not images[0].get('url'):
             raise UpstreamUncertain('Upstream returned no image URL; check response before settlement')
-        store_remote_image(job.id, images[0]['url'], self.timeout_seconds)
+        store_remote_image(job.id, images[0]['url'], self.timeout_seconds, self.account)
         return {'data': [{'url': f'/api/jobs/{job.id}/image'}]}
 
 
@@ -65,7 +69,7 @@ class NovelAIImageAdapter:
         self.timeout_seconds = timeout_seconds
 
     def balance(self) -> int:
-        response = httpx.get(
+        response = upstream_request(self.account, 'GET',
             self.account.base_url.rstrip('/') + '/user/subscription',
             headers={'Authorization': 'Bearer ' + decrypt_upstream_key(self.account.encrypted_key)},
             timeout=self.timeout_seconds,
@@ -87,7 +91,7 @@ class NovelAIImageAdapter:
                 if not raw.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff')):
                     encoded.append(image)
                     continue
-                response = httpx.post(
+                response = upstream_request(self.account, 'POST',
                     self.account.base_url.rstrip('/') + '/ai/encode-vibe',
                     headers={'Authorization': 'Bearer ' + decrypt_upstream_key(self.account.encrypted_key)},
                     json={'image': image, 'information_extracted': extraction,
@@ -100,7 +104,7 @@ class NovelAIImageAdapter:
             parameters['reference_image_multiple'] = encoded
             parameters.pop('reference_information_extracted_multiple', None)
         try:
-            response = httpx.post(
+            response = upstream_request(self.account, 'POST',
                 self.account.base_url.rstrip('/') + '/ai/generate-image',
                 headers={'Authorization': 'Bearer ' + decrypt_upstream_key(self.account.encrypted_key),
                          'Accept': 'application/zip'},

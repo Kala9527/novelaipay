@@ -11,7 +11,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import httpx
 from PIL import Image
 
@@ -34,7 +34,7 @@ from app import db
 from app.bootstrap import main as bootstrap_admin
 from app.config import AdminConfig, RegistrationConfig, get_business_config
 from app.main import app
-from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, RedemptionCode, RegistrationCode, RegistrationSettings, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
+from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, ProxyEndpoint, RedemptionCode, RegistrationCode, RegistrationSettings, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
 from app.models import User
 from app.security import verify_password
 from app.services import claim_job, recover_expired
@@ -42,6 +42,7 @@ from app.worker import run_once
 from app.api.tavern import normalize_request
 from app.novelai import ImageParameters, generation_payload
 from app.upstream import OpenAIImageAdapter
+from app.proxy import request as upstream_request
 from app.security import encrypt_upstream_key
 from app.registration_email import DEFAULT_TEMPLATE, LEGACY_TEMPLATE, registration_settings, render_template
 import base64
@@ -71,6 +72,52 @@ class FlowTest(unittest.TestCase):
 
     def admin_patch(self, path, payload):
         return self.client.patch(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
+
+    def test_managed_proxy_assignment_and_secret_handling(self):
+        self.login('admin@example.com', 'long-test-password')
+        secret = 'http://operator:secret-password@host.docker.internal:7890'
+        self.assertEqual(self.admin_post('/api/admin/proxies', {
+            'name': 'invalid', 'url': 'file:///etc/passwd',
+        }).status_code, 422)
+        created = self.admin_post('/api/admin/proxies', {'name': 'Mihomo', 'url': secret})
+        self.assertEqual(created.status_code, 200, created.text)
+        proxy_id = created.json()['id']
+        self.assertEqual(created.json()['address'], 'http://host.docker.internal:7890')
+        headers = {'X-CSRF-Token': self.client.cookies['nvp_csrf']}
+        self.assertNotIn('secret-password', str(self.client.get('/api/admin/proxies', headers=headers).json()))
+        with db.SessionLocal() as session:
+            self.assertNotIn('secret-password', session.get(ProxyEndpoint, proxy_id).encrypted_url)
+
+        account = self.admin_post('/api/admin/upstreams', {
+            'name': 'proxied', 'provider': 'novelai', 'base_url': 'https://image.novelai.net',
+            'api_key': 'upstream-secret', 'proxy_id': proxy_id,
+        })
+        self.assertEqual(account.status_code, 200, account.text)
+        account_id = account.json()['id']
+        self.assertEqual(account.json()['proxy_id'], proxy_id)
+        self.assertEqual(self.client.get('/api/admin/upstreams', headers=headers).json()[0]['proxy_id'], proxy_id)
+
+        response = MagicMock()
+        response.json.return_value = {'trainingStepsLeft': {
+            'fixedTrainingStepsLeft': 1, 'purchasedTrainingSteps': 2}}
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.request.return_value = response
+        with patch('app.proxy.httpx.Client', return_value=client) as factory:
+            checked = self.admin_post(f'/api/admin/upstreams/{account_id}/check', {})
+        self.assertEqual(checked.status_code, 200, checked.text)
+        factory.assert_called_once_with(proxy=secret, trust_env=False)
+        self.assertEqual(client.request.call_args.args[:2],
+                         ('GET', 'https://image.novelai.net/user/subscription'))
+
+        with db.SessionLocal() as session, patch('app.proxy.httpx.Client', return_value=client):
+            row = session.get(UpstreamAccount, account_id)
+            upstream_request(row, 'POST', 'https://image.novelai.net/ai/generate-image', json={})
+        self.assertEqual(client.request.call_args.args[0], 'POST')
+        self.assertEqual(self.client.delete(f'/api/admin/proxies/{proxy_id}', headers=headers).status_code, 409)
+        self.assertEqual(self.admin_patch(f'/api/admin/upstreams/{account_id}',
+                                          {'proxy_id': None}).status_code, 200)
+        self.assertEqual(self.client.delete(f'/api/admin/proxies/{proxy_id}', headers=headers).status_code, 200)
 
     def test_default_registration_email_template(self):
         with db.SessionLocal.begin() as session:

@@ -13,11 +13,12 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..config import get_settings
 from ..group_access import can_use_group
-from ..models import ApiKey, GenerationJob, GroupAccount, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, User, utcnow
+from ..models import ApiKey, GenerationJob, GroupAccount, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, ProxyEndpoint, UpstreamAccount, UpstreamGroup, User, utcnow
+from ..proxy import proxy_label, request as upstream_request, validate_proxy_url
 from ..registration_email import DEFAULT_TEMPLATE, PLACEHOLDER, RESERVED_VARS, email_ready, registration_settings, send_email
 from ..security import decrypt_upstream_key, encrypt_upstream_key, hash_password, new_api_key
 from ..services import credit_wallet, resolve_uncertain
-from ..upstream import UpstreamUncertain, store_remote_image
+from ..upstream import NovelAIImageAdapter, UpstreamUncertain, store_remote_image
 from .deps import admin_user
 from .user import job_view, key_view
 
@@ -47,6 +48,7 @@ class UpstreamCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(max_length=500)
     api_key: str = Field(min_length=1)
+    proxy_id: int | None = None
     provider: str = Field(default='openai', pattern='^(openai|novelai)$')
     opus_free: bool = False
     max_concurrency: int = Field(default=10, ge=1, le=1000)
@@ -57,9 +59,20 @@ class UpstreamUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     base_url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, min_length=1)
+    proxy_id: int | None = None
     opus_free: bool | None = None
     max_concurrency: int | None = Field(default=None, ge=1, le=1000)
     enabled: bool | None = None
+
+
+class ProxyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=1000)
+
+
+class ProxyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    url: str | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class GroupUpsert(BaseModel):
@@ -365,8 +378,69 @@ def upstreams(include_deleted: bool = False, _: User = Depends(admin_user),
         query = query.where(UpstreamAccount.deleted_at.is_(None))
     return [{'id': row.id, 'name': row.name, 'base_url': row.base_url,
              'provider': row.provider, 'opus_free': row.opus_free, 'enabled': row.enabled,
-             'max_concurrency': row.max_concurrency, 'deleted_at': row.deleted_at}
+             'max_concurrency': row.max_concurrency, 'proxy_id': row.proxy_id,
+             'deleted_at': row.deleted_at}
             for row in db.scalars(query.order_by(UpstreamAccount.id))]
+
+
+@router.get('/proxies')
+def proxies(_: User = Depends(admin_user), db: Session = Depends(get_db)) -> list[dict]:
+    return [{'id': row.id, 'name': row.name,
+             'address': proxy_label(decrypt_upstream_key(row.encrypted_url))}
+            for row in db.scalars(select(ProxyEndpoint).order_by(ProxyEndpoint.id))]
+
+
+@router.post('/proxies')
+def create_proxy(payload: ProxyCreate, _: User = Depends(admin_user),
+                 db: Session = Depends(get_db)) -> dict:
+    name = payload.name.strip()
+    if not name or db.scalar(select(ProxyEndpoint.id).where(ProxyEndpoint.name == name)):
+        raise HTTPException(409, 'Proxy name is empty or already exists')
+    try:
+        url = validate_proxy_url(payload.url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    row = ProxyEndpoint(name=name, encrypted_url=encrypt_upstream_key(url))
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {'id': row.id, 'name': row.name, 'address': proxy_label(url)}
+
+
+@router.patch('/proxies/{proxy_id}')
+def update_proxy(proxy_id: int, payload: ProxyUpdate, _: User = Depends(admin_user),
+                 db: Session = Depends(get_db)) -> dict:
+    row = db.get(ProxyEndpoint, proxy_id)
+    if row is None:
+        raise HTTPException(404, 'Proxy not found')
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(422, 'Proxy name required')
+        duplicate = db.scalar(select(ProxyEndpoint.id).where(
+            ProxyEndpoint.name == name, ProxyEndpoint.id != proxy_id))
+        if duplicate:
+            raise HTTPException(409, 'Proxy name exists')
+        row.name = name
+    if payload.url is not None:
+        try:
+            row.encrypted_url = encrypt_upstream_key(validate_proxy_url(payload.url))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    db.commit()
+    return {'ok': True}
+
+
+@router.delete('/proxies/{proxy_id}')
+def delete_proxy(proxy_id: int, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
+    row = db.get(ProxyEndpoint, proxy_id)
+    if row is None:
+        raise HTTPException(404, 'Proxy not found')
+    if db.scalar(select(UpstreamAccount.id).where(UpstreamAccount.proxy_id == proxy_id).limit(1)):
+        raise HTTPException(409, 'Remove this proxy from upstream accounts first')
+    db.delete(row)
+    db.commit()
+    return {'ok': True}
 
 
 @router.post('/upstreams')
@@ -378,10 +452,13 @@ def create_upstream(payload: UpstreamCreate, _: User = Depends(admin_user), db: 
         raise HTTPException(422, 'Invalid upstream URL')
     if db.scalar(select(UpstreamAccount).where(UpstreamAccount.name == payload.name)):
         raise HTTPException(409, 'Upstream name exists')
+    if payload.proxy_id is not None and db.get(ProxyEndpoint, payload.proxy_id) is None:
+        raise HTTPException(404, 'Proxy not found')
     account = UpstreamAccount(name=payload.name, base_url=payload.base_url.rstrip('/'),
                               encrypted_key=encrypt_upstream_key(payload.api_key),
                               provider=payload.provider, opus_free=payload.opus_free,
-                              max_concurrency=payload.max_concurrency, enabled=payload.enabled)
+                              max_concurrency=payload.max_concurrency, enabled=payload.enabled,
+                              proxy_id=payload.proxy_id)
     db.add(account)
     group = default_group(db)
     db.flush()
@@ -390,7 +467,7 @@ def create_upstream(payload: UpstreamCreate, _: User = Depends(admin_user), db: 
     db.refresh(account)
     return {'id': account.id, 'name': account.name, 'base_url': account.base_url,
             'provider': account.provider, 'opus_free': account.opus_free,
-            'max_concurrency': account.max_concurrency}
+            'max_concurrency': account.max_concurrency, 'proxy_id': account.proxy_id}
 
 
 @router.patch('/upstreams/{account_id}')
@@ -416,6 +493,10 @@ def update_upstream(account_id: int, payload: UpstreamUpdate, _: User = Depends(
         account.base_url = payload.base_url.rstrip('/')
     if payload.api_key is not None:
         account.encrypted_key = encrypt_upstream_key(payload.api_key)
+    if 'proxy_id' in payload.model_fields_set:
+        if payload.proxy_id is not None and db.get(ProxyEndpoint, payload.proxy_id) is None:
+            raise HTTPException(404, 'Proxy not found')
+        account.proxy_id = payload.proxy_id
     if payload.opus_free is not None:
         account.opus_free = payload.opus_free
     if payload.max_concurrency is not None:
@@ -466,7 +547,7 @@ def upstream_models(account_id: int, _: User = Depends(admin_user), db: Session 
                            'nai-diffusion-4-5-curated', 'nai-diffusion-4-5-full',
                            'nai-diffusion-3'], 'source': 'supported'}
     try:
-        response = httpx.get(account.base_url.rstrip('/') + '/models',
+        response = upstream_request(account, 'GET', account.base_url.rstrip('/') + '/models',
             headers={'Authorization': 'Bearer ' + decrypt_upstream_key(account.encrypted_key)},
             timeout=get_settings().upstream_timeout_seconds)
         response.raise_for_status()
@@ -476,6 +557,25 @@ def upstream_models(account_id: int, _: User = Depends(admin_user), db: Session 
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         raise HTTPException(502, 'Could not retrieve upstream models') from exc
     return {'models': models, 'source': 'upstream'}
+
+
+@router.post('/upstreams/{account_id}/check')
+def check_upstream(account_id: int, _: User = Depends(admin_user),
+                   db: Session = Depends(get_db)) -> dict:
+    account = db.get(UpstreamAccount, account_id)
+    if account is None or account.deleted_at:
+        raise HTTPException(404, 'Upstream not found')
+    try:
+        if account.provider == 'novelai':
+            NovelAIImageAdapter(account, min(get_settings().upstream_timeout_seconds, 15)).balance()
+        else:
+            response = upstream_request(account, 'GET', account.base_url.rstrip('/') + '/models',
+                headers={'Authorization': 'Bearer ' + decrypt_upstream_key(account.encrypted_key)},
+                timeout=min(get_settings().upstream_timeout_seconds, 15))
+            response.raise_for_status()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, f'Upstream check failed: {type(exc).__name__}') from exc
+    return {'ok': True}
 
 
 @router.get('/groups')

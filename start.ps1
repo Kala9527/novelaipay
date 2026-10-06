@@ -35,10 +35,25 @@ if ($env:CONDA_DEFAULT_ENV -ne $condaEnvironment -or -not $env:CONDA_PREFIX) {
 }
 $env:PYTHONNOUSERSITE = '1'
 
-$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($listener) {
-    $owners = ($listener | Select-Object -ExpandProperty OwningProcess -Unique) -join ', '
-    throw "Port $Port is already in use by process(es) $owners."
+$listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+if ($listeners.Count -gt 0) {
+    $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($owner in $owners) {
+        if ($owner -le 4 -or $owner -eq $PID) {
+            throw "Port $Port is owned by protected process $owner; stop it manually."
+        }
+        Write-Host "Stopping process $owner on port $Port..."
+        Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    } while ($listeners.Count -gt 0 -and (Get-Date) -lt $deadline)
+    if ($listeners.Count -gt 0) {
+        $owners = ($listeners | Select-Object -ExpandProperty OwningProcess -Unique) -join ', '
+        throw "Port $Port is still in use by process(es) $owners."
+    }
 }
 
 $python = Join-Path $env:CONDA_PREFIX 'python.exe'

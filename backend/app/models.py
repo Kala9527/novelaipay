@@ -81,11 +81,20 @@ class UpstreamAccount(Base):
     name: Mapped[str] = mapped_column(String(80), unique=True)
     base_url: Mapped[str] = mapped_column(String(500))
     encrypted_key: Mapped[str] = mapped_column(Text)
+    proxy_id: Mapped[int | None] = mapped_column(ForeignKey('proxy_endpoints.id'))
+    proxy: Mapped['ProxyEndpoint | None'] = relationship()
     provider: Mapped[str] = mapped_column(String(20), default='openai')
     opus_free: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=10)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProxyEndpoint(Base):
+    __tablename__ = 'proxy_endpoints'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    encrypted_url: Mapped[str] = mapped_column(Text)
 
 
 class UpstreamGroup(Base):

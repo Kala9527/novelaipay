@@ -15,4 +15,5 @@ backend/dev.db
 *.db
 *.tsbuildinfo
 配置文件.txt
+敏感文件切勿提交.txt
 data/

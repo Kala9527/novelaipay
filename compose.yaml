@@ -19,6 +19,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - images:/app/data/images
@@ -38,6 +43,11 @@ services:
     image: novelaipay:${APP_VERSION:-0.2.0}
     restart: unless-stopped
     env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - images:/app/data/images

@@ -15,11 +15,15 @@ import { ModelPlazaPage } from './pages/ModelPlazaPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { PublicHeader } from './components/PublicHeader'
 import { RedemptionPage } from './pages/RedemptionPage'
+import { QuickstartPage } from './pages/QuickstartPage'
+import { PreferencesPage } from './pages/PreferencesPage'
+import { usePreferences } from './lib/preferences'
 import { Outlet } from 'react-router-dom'
 
 function PublicLayout() { return <><PublicHeader loggedIn={false} /><Outlet /></> }
 
 export function App() {
+  const { t } = usePreferences()
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const refresh = useCallback(async () => {
@@ -42,7 +46,7 @@ export function App() {
       window.removeEventListener('novelaipay:data-changed', refresh)
     }
   }, [refresh])
-  if (loading) return <div className="loading">正在加载 YunZhanCloud...</div>
+  if (loading) return <div className="loading">{t('loading')}</div>
   return <Routes>
     <Route path="/login" element={user ? <Navigate to="/" /> : <LoginPage onLogin={refresh} />} />
     <Route element={user ? <Layout user={user} onLogout={signedOut} /> : <PublicLayout />}>
@@ -51,6 +55,8 @@ export function App() {
     <Route element={user ? <Layout user={user} onLogout={signedOut} /> : <Navigate to="/login" />}>
       <Route path="/" element={<DashboardPage user={user!} />} />
       <Route path="/keys" element={<KeysPage />} />
+      <Route path="/quickstart" element={<QuickstartPage />} />
+      <Route path="/preferences" element={<PreferencesPage />} />
       <Route path="/workshop" element={<JobsPage userId={user?.id ?? 0} />} />
       <Route path="/jobs" element={<UsagePage isAdmin={user?.is_admin ?? false} />} />
       <Route path="/billing" element={<BillingRecordsPage isAdmin={user?.is_admin ?? false} />} />

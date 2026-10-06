@@ -1,6 +1,6 @@
 # Novelaipay
 
-FastAPI + React/Vite/TypeScript image API console with NovelAI and OpenAI-compatible upstreams. The API and worker share one Python 3.13 image; PostgreSQL stores jobs, accounts, balances and immutable ledger entries. SQLite is supported for local debugging. The built frontend is served by FastAPI on port **8009**.
+FastAPI + React/Vite/TypeScript image API console with NovelAI and OpenAI-compatible upstreams. PostgreSQL stores jobs, accounts, balances and immutable ledger entries; SQLite is supported for local debugging. The built frontend is served by FastAPI on port **8009**. For Git-based Ubuntu deployment with host services and optional Docker PostgreSQL, see [the host deployment guide](deploy/README-host.md). A full Docker Compose deployment is also available.
 
 ## Local development (Windows)
 

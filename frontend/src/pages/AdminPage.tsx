@@ -1,16 +1,17 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Check, Pencil, Plus, RefreshCw, RotateCcw, Search, Trash2, X } from 'lucide-react'
+import { Check, Network, Pencil, Plus, RefreshCw, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { api, formatDate, formatMoney, post } from '../lib/api'
-import type { Group, GroupRecipient, Job, Mapping, Upstream } from '../types'
+import type { Group, GroupRecipient, Job, Mapping, ProxyEndpoint, Upstream } from '../types'
 import { Empty, Notice, PageHeader, Status } from '../components/UI'
 import { UserManagement } from '../components/UserManagement'
 import { AnnouncementManagement } from '../components/AnnouncementManagement'
 import { RedemptionManagement } from '../components/RedemptionManagement'
 import { RegistrationManagement } from '../components/RegistrationManagement'
 
-type Tab = 'models' | 'groups' | 'accounts' | 'users' | 'registration' | 'redemption' | 'announcements' | 'reconcile'
+type Tab = 'models' | 'groups' | 'accounts' | 'proxies' | 'users' | 'registration' | 'redemption' | 'announcements' | 'reconcile'
 const emptyGroup = () => ({ id: null as number | null, name: '', max_concurrency: 10, account_ids: [] as number[], member_ids: [] as number[], is_private: false, enabled: true })
-const emptyAccount = () => ({ id: null as number | null, name: '', base_url: 'https://image.novelai.net', api_key: '', provider: 'novelai', opus_free: false, max_concurrency: 10, enabled: true })
+const emptyAccount = () => ({ id: null as number | null, name: '', base_url: 'https://image.novelai.net', api_key: '', provider: 'novelai', opus_free: false, max_concurrency: 10, proxy_id: null as number | null, enabled: true })
+const emptyProxy = () => ({ id: null as number | null, name: '', url: '' })
 const emptyMapping = () => ({ id: null as number | null, public_name: '', upstream_account_id: '', upstream_model: '', price: '', extra_amount: '0.1', enabled: true })
 
 export function AdminPage() {
@@ -19,6 +20,7 @@ export function AdminPage() {
   const [showArchived, setShowArchived] = useState(false)
   const [search, setSearch] = useState('')
   const [upstreams, setUpstreams] = useState<Upstream[]>([])
+  const [proxies, setProxies] = useState<ProxyEndpoint[]>([])
   const [groups, setGroups] = useState<Group[]>([])
   const [catalogs, setCatalogs] = useState<Record<number, string[]>>({})
   const [group, setGroup] = useState(emptyGroup)
@@ -30,6 +32,7 @@ export function AdminPage() {
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [account, setAccount] = useState(emptyAccount)
+  const [proxy, setProxy] = useState(emptyProxy)
   const [mapping, setMapping] = useState(emptyMapping)
   const [resolution, setResolution] = useState<Record<string, string>>({})
   const [resolutionAnlas, setResolutionAnlas] = useState<Record<string, string>>({})
@@ -38,6 +41,7 @@ export function AdminPage() {
 
   function load() {
     api<Upstream[]>('/api/admin/upstreams?include_deleted=true').then(setUpstreams).catch(e => setError(e.message))
+    api<ProxyEndpoint[]>('/api/admin/proxies').then(setProxies).catch(e => setError(e.message))
     api<Group[]>('/api/admin/groups?include_deleted=true').then(setGroups).catch(e => setError(e.message))
     api<GroupRecipient[]>('/api/admin/group-recipients').then(setRecipients).catch(e => setError(e.message))
     api<Mapping[]>('/api/admin/mappings?include_deleted=true').then(setMappings).catch(e => setError(e.message))
@@ -80,6 +84,23 @@ export function AdminPage() {
     } catch (e) { setError((e as Error).message) }
   }
 
+  async function saveProxy(event: FormEvent) {
+    event.preventDefault(); setError(''); setMessage('')
+    try {
+      if (proxy.id) await api(`/api/admin/proxies/${proxy.id}`, { method: 'PATCH', body: JSON.stringify({ name: proxy.name, url: proxy.url || undefined }) })
+      else await post('/api/admin/proxies', proxy)
+      setProxy(emptyProxy()); setEditor(null)
+      setMessage(proxy.id ? '代理已更新' : '代理已添加')
+      load()
+    } catch (e) { setError((e as Error).message) }
+  }
+
+  async function checkAccount(id: number) {
+    setError(''); setMessage('')
+    try { await post(`/api/admin/upstreams/${id}/check`, {}); setMessage('上游连接正常') }
+    catch (e) { setError((e as Error).message) }
+  }
+
   function saveMapping(event: FormEvent) {
     event.preventDefault()
     const provider = upstreams.find(row => row.id === Number(mapping.upstream_account_id))?.provider
@@ -103,8 +124,13 @@ export function AdminPage() {
   function editAccount(row: Upstream) {
     setAccount({ id: row.id, name: row.name, base_url: row.base_url, api_key: '',
       provider: row.provider, opus_free: row.opus_free, max_concurrency: row.max_concurrency,
-      enabled: row.enabled })
+      proxy_id: row.proxy_id, enabled: row.enabled })
     openEditor('accounts')
+  }
+
+  function editProxy(row: ProxyEndpoint) {
+    setProxy({ id: row.id, name: row.name, url: '' })
+    openEditor('proxies')
   }
 
   const activeGroups = groups.filter(row => !row.deleted_at)
@@ -115,12 +141,13 @@ export function AdminPage() {
   const query = search.trim().toLocaleLowerCase()
   const visibleGroups = groups.filter(row => (showArchived || !row.deleted_at) && row.name.toLocaleLowerCase().includes(query))
   const visibleAccounts = upstreams.filter(row => (showArchived || !row.deleted_at) && `${row.name} ${row.base_url} ${row.provider}`.toLocaleLowerCase().includes(query))
+  const visibleProxies = proxies.filter(row => `${row.name} ${row.address}`.toLocaleLowerCase().includes(query))
   const visibleMappings = mappings.filter(row => (showArchived || !row.deleted_at) && `${row.public_name} ${groups.find(group => group.id === row.group_id)?.name || ''}`.toLocaleLowerCase().includes(query))
   const toolbar = (title: string, count: number, create: () => void, createLabel: string) => <div className="admin-toolbar"><div><h2>{title}</h2><span>{count} 项</span></div><div className="admin-toolbar-actions"><label className="admin-search"><Search size={15} /><input aria-label={`搜索${title}`} placeholder="搜索" value={search} onChange={e => setSearch(e.target.value)} /></label><label className="check-label"><input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />显示已删除</label><button className="button primary" type="button" onClick={create}><Plus size={16} />{createLabel}</button></div></div>
 
   return <div className="page admin-page">
     <PageHeader title="管理设置" subtitle="配置分组、上游和模型定价" action={<button className="button secondary" onClick={load}><RefreshCw size={16} />刷新</button>} />
-    <div className="tabs">{([['models', '模型与定价'], ['groups', '分组'], ['accounts', '上游账户'], ['users', '用户与余额'], ['registration', '登录与注册'], ['redemption', '兑换码管理'], ['announcements', '公告'], ['reconcile', `待核对 (${uncertain.length})`]] as [Tab, string][]).map(([key, label]) => <button key={key} className={tab === key ? 'tab active' : 'tab'} onClick={() => { setTab(key); setEditor(null); setSearch(''); setError(''); setMessage('') }}>{label}</button>)}</div>
+    <div className="tabs">{([['models', '模型与定价'], ['groups', '分组'], ['accounts', '上游账户'], ['proxies', 'IP 管理'], ['users', '用户与余额'], ['registration', '登录与注册'], ['redemption', '兑换码管理'], ['announcements', '公告'], ['reconcile', `待核对 (${uncertain.length})`]] as [Tab, string][]).map(([key, label]) => <button key={key} className={tab === key ? 'tab active' : 'tab'} onClick={() => { setTab(key); setEditor(null); setSearch(''); setError(''); setMessage('') }}>{label}</button>)}</div>
     {error && <Notice text={error} error />}{message && <Notice text={message} />}
 
     {tab === 'groups' && <>
@@ -163,13 +190,26 @@ export function AdminPage() {
         <label>接口类型<select disabled={!!account.id} value={account.provider} onChange={e => setAccount({ ...account, provider: e.target.value })}><option value="novelai">NovelAI</option><option value="openai">OpenAI 兼容</option></select></label>
         <label>API 基础地址<input required type="url" value={account.base_url} onChange={e => setAccount({ ...account, base_url: e.target.value })} placeholder="https://image.novelai.net" /></label>
         <label className="wide">上游密钥<input required={!account.id} type="password" autoComplete="new-password" value={account.api_key} onChange={e => setAccount({ ...account, api_key: e.target.value })} placeholder={account.id ? '留空则不修改' : ''} /></label>
+        <label>出口代理<select value={account.proxy_id ?? ''} onChange={e => setAccount({ ...account, proxy_id: e.target.value ? Number(e.target.value) : null })}><option value="">不指定</option>{proxies.map(row => <option key={row.id} value={row.id}>{row.name} · {row.address}</option>)}</select></label>
         <label>最大并发数<input type="number" min="1" max="1000" required value={account.max_concurrency} onChange={e => setAccount({ ...account, max_concurrency: Number(e.target.value) })} /></label>
         {account.provider === 'novelai' && <label className="check-label"><input type="checkbox" checked={account.opus_free} onChange={e => setAccount({ ...account, opus_free: e.target.checked })} />Opus 免费条件适用</label>}
         <label className="check-label"><input type="checkbox" checked={account.enabled} onChange={e => setAccount({ ...account, enabled: e.target.checked })} />启用</label>
         <div className="admin-form-actions"><button className="button primary"><Check size={16} />保存账户</button><button type="button" className="button secondary" onClick={() => setEditor(null)}>取消</button></div>
       </form></section>}
-      {visibleAccounts.length ? <div className="table-scroll admin-table"><table><thead><tr><th>账户</th><th>类型</th><th>基础地址</th><th>最大并发</th><th>状态</th><th className="right">操作</th></tr></thead><tbody>{visibleAccounts.map(row => <tr key={row.id}><td><strong>{row.name}</strong></td><td>{row.provider}</td><td className="mono">{row.base_url}</td><td>{row.max_concurrency}</td><td><span className={`admin-state ${row.deleted_at ? 'archived' : row.enabled ? 'active' : ''}`}>{row.deleted_at ? '已删除' : row.enabled ? '启用' : '停用'}</span></td><td className="right"><div className="admin-row-actions">{row.deleted_at ? <button className="icon-button" title="恢复账户" onClick={() => restore(`/api/admin/upstreams/${row.id}/restore`, row.name)}><RotateCcw size={16} /></button> : <><button className="icon-button" title="获取模型" onClick={() => fetchModels(row.id)}><RefreshCw size={16} /></button><button className="icon-button" title="编辑账户" onClick={() => editAccount(row)}><Pencil size={16} /></button><button className="icon-button danger" title="删除账户" onClick={() => remove(`/api/admin/upstreams/${row.id}`, row.name, '请先从已发布模型中移除该账户。')}><Trash2 size={16} /></button></>}</div></td></tr>)}</tbody></table></div> : <Empty text="暂无上游账户" />}
+      {visibleAccounts.length ? <div className="table-scroll admin-table"><table><thead><tr><th>账户</th><th>类型</th><th>基础地址</th><th>出口代理</th><th>最大并发</th><th>状态</th><th className="right">操作</th></tr></thead><tbody>{visibleAccounts.map(row => <tr key={row.id}><td><strong>{row.name}</strong></td><td>{row.provider}</td><td className="mono">{row.base_url}</td><td>{proxies.find(proxy => proxy.id === row.proxy_id)?.name || '未指定'}</td><td>{row.max_concurrency}</td><td><span className={`admin-state ${row.deleted_at ? 'archived' : row.enabled ? 'active' : ''}`}>{row.deleted_at ? '已删除' : row.enabled ? '启用' : '停用'}</span></td><td className="right"><div className="admin-row-actions">{row.deleted_at ? <button className="icon-button" title="恢复账户" onClick={() => restore(`/api/admin/upstreams/${row.id}/restore`, row.name)}><RotateCcw size={16} /></button> : <><button className="icon-button" title="检查上游连接" onClick={() => checkAccount(row.id)}><Network size={16} /></button><button className="icon-button" title="获取模型" onClick={() => fetchModels(row.id)}><RefreshCw size={16} /></button><button className="icon-button" title="编辑账户" onClick={() => editAccount(row)}><Pencil size={16} /></button><button className="icon-button danger" title="删除账户" onClick={() => remove(`/api/admin/upstreams/${row.id}`, row.name, '请先从已发布模型中移除该账户。')}><Trash2 size={16} /></button></>}</div></td></tr>)}</tbody></table></div> : <Empty text="暂无上游账户" />}
       {Object.keys(catalogs).length > 0 && <div className="admin-catalog-count">已获取模型：{Object.entries(catalogs).map(([id, names]) => `${upstreams.find(row => row.id === Number(id))?.name || id} ${names.length} 个`).join(' · ')}</div>}
+    </>}
+
+    {tab === 'proxies' && <>
+      {toolbar('出口代理', visibleProxies.length, () => { setProxy(emptyProxy()); openEditor('proxies') }, '添加代理')}
+      {editor === 'proxies' && <section id="admin-editor" className="admin-edit-section"><div className="admin-edit-heading"><h3>{proxy.id ? `编辑代理 · ${proxy.name}` : '添加出口代理'}</h3><button type="button" className="icon-button" title="关闭编辑" onClick={() => setEditor(null)}><X size={17} /></button></div>
+        <form className="form-grid" onSubmit={saveProxy}>
+          <label>名称<input required maxLength={80} value={proxy.name} onChange={e => setProxy({ ...proxy, name: e.target.value })} placeholder="例如 NovelAI 出口" /></label>
+          <label className="wide">代理地址<input required={!proxy.id} type="text" autoComplete="off" value={proxy.url} onChange={e => setProxy({ ...proxy, url: e.target.value })} placeholder={proxy.id ? '留空则不修改' : 'http://127.0.0.1:7890'} /></label>
+          <div className="admin-form-actions"><button className="button primary"><Check size={16} />保存代理</button><button type="button" className="button secondary" onClick={() => setEditor(null)}>取消</button></div>
+        </form>
+      </section>}
+      {visibleProxies.length ? <div className="table-scroll admin-table"><table><thead><tr><th>名称</th><th>地址</th><th>已分配账户</th><th className="right">操作</th></tr></thead><tbody>{visibleProxies.map(row => <tr key={row.id}><td><strong>{row.name}</strong></td><td className="mono">{row.address}</td><td>{upstreams.filter(account => account.proxy_id === row.id && !account.deleted_at).map(account => account.name).join('、') || '无'}</td><td className="right"><div className="admin-row-actions"><button className="icon-button" title="编辑代理" onClick={() => editProxy(row)}><Pencil size={16} /></button><button className="icon-button danger" title="删除代理" onClick={() => remove(`/api/admin/proxies/${row.id}`, row.name, '请先从上游账户中移除该代理。')}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div> : <Empty text="暂无出口代理" />}
     </>}
 
     {tab === 'users' && <UserManagement />}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Novelaipay Worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=novelaipay
+Group=novelaipay
+WorkingDirectory=/opt/apps/novelaipay/backend
+ExecStart=/opt/apps/novelaipay/.venv/bin/python -m app.worker
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
