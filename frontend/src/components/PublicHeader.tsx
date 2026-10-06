@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Activity, ArrowRight, Megaphone, Store, X } from 'lucide-react'
+import { ArrowRight, Megaphone, Store, X } from 'lucide-react'
 import { api, formatDate } from '../lib/api'
 import type { Announcement } from '../types'
+import brandIcon from '../assets/brand-icon.svg'
 
 export function PublicHeader({ loggedIn }: { loggedIn: boolean }) {
   const [announcements, setAnnouncements] = useState<Announcement[]>([])
@@ -23,7 +24,7 @@ export function PublicHeader({ loggedIn }: { loggedIn: boolean }) {
   const current = announcements.find(item => item.id === selected)
   return <>
     <header className="public-header">
-      <Link to={loggedIn ? '/' : '/login'} className="public-brand"><span className="brand-mark"><Activity size={19} /></span><strong>Novelaipay</strong></Link>
+      <Link to={loggedIn ? '/' : '/login'} className="public-brand"><span className="brand-mark"><img src={brandIcon} alt="" /></span><strong>YunZhanCloud</strong></Link>
       <nav className="public-actions" aria-label="页面导航">
         <button type="button" className="header-link" onClick={() => { setSelected(null); setOpen(true); api<Announcement[]>('/api/public/announcements').then(setAnnouncements).catch(() => {}) }}><Megaphone size={17} />公告{announcements.length > 0 && <span className="header-count">{announcements.length}</span>}</button>
         <Link className="header-link" to="/models"><Store size={17} />模型广场</Link>

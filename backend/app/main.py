@@ -9,7 +9,7 @@ from .api import admin, auth, catalog, exports, generation, payment, redemption,
 from .config import get_settings
 
 
-app = FastAPI(title='Novelaipay', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='YunZhanCloud', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware,
                    allow_origins=[origin.strip() for origin in get_settings().cors_allowed_origins.split(',')
                                   if origin.strip()],

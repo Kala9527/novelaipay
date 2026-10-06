@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Activity, ArrowRightFromLine, BookOpen, CreditCard, Gift, Images, KeyRound, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings2, Store, UserRound, WandSparkles } from 'lucide-react'
+import { ArrowRightFromLine, BookOpen, CreditCard, Gift, Images, KeyRound, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings2, Store, UserRound, WandSparkles } from 'lucide-react'
 import type { User } from '../types'
 import { api, formatMoney } from '../lib/api'
 import { PublicHeader } from './PublicHeader'
+import brandIcon from '../assets/brand-icon.svg'
 
 export function Layout({ user, onLogout }: { user: User; onLogout: () => void }) {
   const navigate = useNavigate()
@@ -36,7 +37,7 @@ export function Layout({ user, onLogout }: { user: User; onLogout: () => void })
   return <div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}>
     <PublicHeader loggedIn />
     <aside className="sidebar">
-      <div className="sidebar-head"><div className="brand"><span className="brand-mark"><Activity size={19} strokeWidth={2.4} /></span><div className="sidebar-text"><strong>Novelaipay</strong><small>IMAGE API CONSOLE</small></div></div><button type="button" className="sidebar-toggle icon-button" aria-label={collapsed ? '展开侧栏' : '收起侧栏'} title={collapsed ? '展开侧栏' : '收起侧栏'} onClick={toggleSidebar}>{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button></div>
+      <div className="sidebar-head"><div className="brand"><span className="brand-mark"><img src={brandIcon} alt="" /></span><div className="sidebar-text"><strong>YunZhanCloud</strong><small>IMAGE API CONSOLE</small></div></div><button type="button" className="sidebar-toggle icon-button" aria-label={collapsed ? '展开侧栏' : '收起侧栏'} title={collapsed ? '展开侧栏' : '收起侧栏'} onClick={toggleSidebar}>{collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}</button></div>
       <nav className="side-nav">{links.map(({ to, label, icon: Icon }) => <NavLink key={to} end={to === '/'} to={to} title={collapsed ? label : undefined} className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}><Icon size={18} /><span className="nav-label">{label}</span></NavLink>)}</nav>
       <div className="sidebar-bottom"><div className="sidebar-text"><div className="sidebar-label">账户余额</div><div className="sidebar-balance">{formatMoney(user.balance)}</div></div><button className="account-button" onClick={signOut} title="退出登录"><span className="sidebar-text">{user.name || user.email}</span><ArrowRightFromLine size={17} /></button></div>
     </aside>

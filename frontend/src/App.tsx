@@ -42,7 +42,7 @@ export function App() {
       window.removeEventListener('novelaipay:data-changed', refresh)
     }
   }, [refresh])
-  if (loading) return <div className="loading">正在加载 Novelaipay...</div>
+  if (loading) return <div className="loading">正在加载 YunZhanCloud...</div>
   return <Routes>
     <Route path="/login" element={user ? <Navigate to="/" /> : <LoginPage onLogin={refresh} />} />
     <Route element={user ? <Layout user={user} onLogout={signedOut} /> : <PublicLayout />}>

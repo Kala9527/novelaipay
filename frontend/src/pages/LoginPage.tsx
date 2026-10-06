@@ -56,6 +56,6 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
         <button className="button primary full" disabled={busy}>{busy ? '请稍候...' : mode === 'login' ? '登录' : '创建账户'}<ArrowRight size={17} /></button>
       </form>
     </div></div>
-    <div className="login-footer">NOVELAIPAY · IMAGE STUDIO</div>
+    <div className="login-footer">YUNZHANCLOUD · IMAGE STUDIO</div>
   </div>
 }
