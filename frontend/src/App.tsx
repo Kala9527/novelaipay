@@ -14,6 +14,7 @@ import { ApiGuidePage } from './pages/ApiGuidePage'
 import { ModelPlazaPage } from './pages/ModelPlazaPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { PublicHeader } from './components/PublicHeader'
+import { RedemptionPage } from './pages/RedemptionPage'
 import { Outlet } from 'react-router-dom'
 
 function PublicLayout() { return <><PublicHeader loggedIn={false} /><Outlet /></> }
@@ -27,7 +28,20 @@ export function App() {
     finally { setLoading(false) }
   }, [])
   const signedOut = useCallback(() => setUser(null), [])
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    refresh()
+    const interval = window.setInterval(refresh, 5000)
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', refresh)
+    window.addEventListener('novelaipay:data-changed', refresh)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', refresh)
+      window.removeEventListener('novelaipay:data-changed', refresh)
+    }
+  }, [refresh])
   if (loading) return <div className="loading">正在加载 Novelaipay...</div>
   return <Routes>
     <Route path="/login" element={user ? <Navigate to="/" /> : <LoginPage onLogin={refresh} />} />
@@ -40,6 +54,7 @@ export function App() {
       <Route path="/workshop" element={<JobsPage userId={user?.id ?? 0} />} />
       <Route path="/jobs" element={<UsagePage isAdmin={user?.is_admin ?? false} />} />
       <Route path="/billing" element={<BillingRecordsPage isAdmin={user?.is_admin ?? false} />} />
+      <Route path="/redemption" element={<RedemptionPage />} />
       <Route path="/profile" element={<ProfilePage user={user!} onUpdated={refresh} />} />
       <Route path="/api-guide" element={<ApiGuidePage />} />
       <Route path="/admin" element={user?.is_admin ? <AdminPage /> : <Navigate to="/" />} />

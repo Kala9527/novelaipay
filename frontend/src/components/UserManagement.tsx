@@ -12,7 +12,7 @@ export function UserManagement() {
   const [page, setPage] = useState(0)
   const [panel, setPanel] = useState<'create' | 'credit' | null>(null)
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', max_concurrency: 2 })
-  const [credit, setCredit] = useState({ user_id: '', amount: '', reference: '' })
+  const [credit, setCredit] = useState({ user_id: '', amount: '' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [keys, setKeys] = useState<Key[]>([])
   const [keyName, setKeyName] = useState('')
@@ -30,6 +30,11 @@ export function UserManagement() {
       .then(rows => { if (current) setUsers(rows) })
       .catch(e => { if (current) setError(e.message) })
     return () => { current = false }
+  }, [showDeleted, search, page])
+  useEffect(() => {
+    const interval = window.setInterval(loadUsers, 10000)
+    window.addEventListener('novelaipay:data-changed', loadUsers)
+    return () => { window.clearInterval(interval); window.removeEventListener('novelaipay:data-changed', loadUsers) }
   }, [showDeleted, search, page])
   useEffect(() => { api<Group[]>('/api/admin/groups').then(setGroups).catch(e => setError(e.message)) }, [])
 
@@ -49,7 +54,7 @@ export function UserManagement() {
   async function addCredit(event: FormEvent) {
     event.preventDefault()
     if (await run(() => post('/api/admin/credit', { ...credit, user_id: Number(credit.user_id) }))) {
-      setCredit({ user_id: '', amount: '', reference: '' }); setPanel(null)
+      setCredit({ user_id: '', amount: '' }); setPanel(null)
     }
   }
 
@@ -132,7 +137,6 @@ export function UserManagement() {
     {panel === 'credit' && <section id="admin-editor" className="admin-edit-section"><div className="admin-edit-heading"><h3>账户入账</h3><button type="button" className="icon-button" title="关闭" onClick={() => setPanel(null)}><X size={17} /></button></div><form className="form-grid" onSubmit={addCredit}>
       <label>用户<select required value={credit.user_id} onChange={e => setCredit({ ...credit, user_id: e.target.value })}><option value="">选择用户</option>{users.filter(u => u.is_active && !u.deleted_at).map(u => <option key={u.id} value={u.id}>{u.name || u.email}{u.is_admin ? '（管理员）' : ''}</option>)}</select></label>
       <label>金额 (CNY)<input required type="number" step="0.0001" min="0.0001" value={credit.amount} onChange={e => setCredit({ ...credit, amount: e.target.value })} /></label>
-      <label>唯一流水号<input required maxLength={80} value={credit.reference} onChange={e => setCredit({ ...credit, reference: e.target.value })} /></label>
       <div className="admin-form-actions"><button className="button primary"><Check size={16} />确认入账</button><button type="button" className="button secondary" onClick={() => setPanel(null)}>取消</button></div>
     </form></section>}
 

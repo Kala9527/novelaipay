@@ -9,6 +9,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin' })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : `请求失败 (${response.status})`)
+  if (options.method && options.method.toUpperCase() !== 'GET') window.dispatchEvent(new Event('novelaipay:data-changed'))
   return body as T
 }
 

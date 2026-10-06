@@ -190,6 +190,19 @@ class PaymentOrder(Base):
     __table_args__ = (UniqueConstraint('provider', 'transaction_id', name='uq_payment_transaction'),)
 
 
+class RedemptionCode(Base):
+    __tablename__ = 'redemption_codes'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    prefix: Mapped[str] = mapped_column(String(12))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    created_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    redeemed_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'))
+    redeemed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Announcement(Base):
     __tablename__ = 'announcements'
     id: Mapped[int] = mapped_column(primary_key=True)

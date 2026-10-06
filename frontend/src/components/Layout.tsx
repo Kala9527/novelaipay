@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Activity, ArrowRightFromLine, BookOpen, CreditCard, Images, KeyRound, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings2, Store, UserRound, WandSparkles } from 'lucide-react'
+import { Activity, ArrowRightFromLine, BookOpen, CreditCard, Gift, Images, KeyRound, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings2, Store, UserRound, WandSparkles } from 'lucide-react'
 import type { User } from '../types'
 import { api, formatMoney } from '../lib/api'
 import { PublicHeader } from './PublicHeader'
@@ -28,6 +28,7 @@ export function Layout({ user, onLogout }: { user: User; onLogout: () => void })
     { to: '/workshop', label: '生图工作台', icon: WandSparkles },
     { to: '/jobs', label: '使用记录', icon: Images },
     { to: '/billing', label: '账单流水', icon: CreditCard },
+    { to: '/redemption', label: '兑换码', icon: Gift },
     { to: '/api-guide', label: '接口文档', icon: BookOpen },
     { to: '/profile', label: '用户管理', icon: UserRound },
     ...(user.is_admin ? [{ to: '/admin', label: '管理设置', icon: Settings2 }] : []),

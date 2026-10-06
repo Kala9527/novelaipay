@@ -70,6 +70,44 @@ class FlowTest(unittest.TestCase):
     def admin_patch(self, path, payload):
         return self.client.patch(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
 
+    def test_redemption_codes_and_generated_credit_reference(self):
+        self.login('admin@example.com', 'long-test-password')
+        created = self.admin_post('/api/admin/users', {
+            'name': 'Redeemer', 'email': 'redeemer@example.com', 'password': 'user-password-123',
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        user_id = created.json()['id']
+        credit = self.admin_post('/api/admin/credit', {'user_id': user_id, 'amount': '2'})
+        self.assertEqual(credit.status_code, 200, credit.text)
+        self.assertTrue(credit.json()['reference'].startswith('admin:'))
+        self.assertNotEqual(credit.json()['reference'], self.admin_post(
+            '/api/admin/credit', {'user_id': user_id, 'amount': '1'}).json()['reference'])
+        for amount in ('0.1', '0', '-1'):
+            self.assertEqual(self.admin_post('/api/admin/redemption-codes',
+                {'amount': amount, 'count': 1}).status_code, 422)
+        batch = self.admin_post('/api/admin/redemption-codes', {'amount': '0.1001', 'count': 2})
+        self.assertEqual(batch.status_code, 200, batch.text)
+        codes = batch.json()['codes']
+        self.assertEqual(len(set(codes)), 2)
+        listed = self.client.get('/api/admin/redemption-codes',
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).json()
+        self.assertEqual(len(listed), 2)
+        self.assertNotIn(codes[0], str(listed))
+        self.assertEqual(self.client.delete(f"/api/admin/redemption-codes/{listed[0]['id']}",
+            headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']}).status_code, 200)
+        self.login('redeemer@example.com', 'user-password-123')
+        self.assertEqual(self.admin_post('/api/admin/redemption-codes',
+            {'amount': '1', 'count': 1}).status_code, 403)
+        used = self.admin_post('/api/redemption-codes/redeem', {'code': codes[0]})
+        self.assertEqual(used.status_code, 200, used.text)
+        self.assertEqual(used.json()['balance'], '3.1001')
+        self.assertEqual(self.admin_post('/api/redemption-codes/redeem',
+            {'code': codes[0]}).status_code, 409)
+        self.assertEqual(self.admin_post('/api/redemption-codes/redeem',
+            {'code': codes[1]}).status_code, 409)
+        self.assertEqual(self.client.get('/api/auth/me').json()['balance'], '3.1001')
+        self.assertEqual(self.client.get('/api/billing?kind=redemption').json()['ledger_total'], 1)
+
     def test_profile_and_password_reset(self):
         registered = self.client.post('/api/auth/register', json={
             'name': 'First Name', 'email': 'profile@example.com', 'password': 'initial-password-123',

@@ -1,4 +1,5 @@
 from decimal import Decimal
+import uuid
 from urllib.parse import urlparse
 import httpx
 
@@ -88,7 +89,6 @@ class MappingUpsert(BaseModel):
 class CreditRequest(BaseModel):
     user_id: int
     amount: Decimal = Field(gt=0, max_digits=14, decimal_places=4)
-    reference: str = Field(min_length=1, max_length=80)
 
 
 class UserCreate(BaseModel):
@@ -271,8 +271,9 @@ def revoke_user_key(user_id: int, key_id: int, _: User = Depends(admin_user),
 
 @router.post('/credit')
 def credit(payload: CreditRequest, _: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict:
-    credit_wallet(db, payload.user_id, payload.amount, f'admin:{payload.reference}', 'admin_credit')
-    return {'ok': True}
+    reference = f'admin:{uuid.uuid4().hex}'
+    credit_wallet(db, payload.user_id, payload.amount, reference, 'admin_credit')
+    return {'ok': True, 'reference': reference}
 
 
 @router.get('/upstreams')
