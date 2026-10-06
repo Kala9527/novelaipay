@@ -134,6 +134,12 @@ class FlowTest(unittest.TestCase):
         anonymous = self.client.get('/api/public/models')
         self.assertEqual(anonymous.status_code, 200, anonymous.text)
         self.assertEqual([row['name'] for row in anonymous.json()], ['public-model'])
+        self.login('admin@example.com', 'long-test-password')
+        self.assertEqual({row['name'] for row in self.client.get('/api/public/models').json()},
+                         {'public-model', 'private-model'})
+        self.assertEqual({row['name'] for row in self.client.get('/api/models').json()},
+                         {'public-model', 'private-model'})
+        self.client.cookies.clear()
         plaza = self.client.get('/models')
         self.assertEqual(plaza.status_code, 200, plaza.text)
         self.assertIn('<div id="root"></div>', plaza.text)
@@ -147,6 +153,15 @@ class FlowTest(unittest.TestCase):
         rows = self.client.get('/api/public/models').json()
         self.assertEqual({row['name'] for row in rows}, {'public-model', 'private-model'})
         self.assertEqual(next(row for row in rows if row['is_private'])['group_name'], 'Private Group')
+        self.client.cookies.clear()
+        self.assertEqual([row['name'] for row in self.client.get('/api/public/models').json()],
+                         ['public-model'])
+        self.client.post('/api/auth/register', json={
+            'name': 'Unassigned User', 'email': 'unassigned@example.com',
+            'password': 'unassigned-password-123',
+        })
+        self.assertEqual([row['name'] for row in self.client.get('/api/public/models').json()],
+                         ['public-model'])
 
     def test_announcement_audience_and_beijing_schedule(self):
         self.login('admin@example.com', 'long-test-password')
