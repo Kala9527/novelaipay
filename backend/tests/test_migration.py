@@ -17,6 +17,7 @@ class GroupMigrationTest(unittest.TestCase):
                     CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
                     INSERT INTO alembic_version VALUES ('0007');
                     CREATE TABLE upstream_accounts (id INTEGER PRIMARY KEY, name VARCHAR(80));
+                    CREATE TABLE users (id INTEGER PRIMARY KEY, email VARCHAR(320));
                     INSERT INTO upstream_accounts VALUES (7, 'legacy');
                     CREATE TABLE model_mappings (
                         id INTEGER PRIMARY KEY, public_name VARCHAR(100) UNIQUE,
@@ -42,7 +43,7 @@ class GroupMigrationTest(unittest.TestCase):
                 self.assertEqual(connection.execute('SELECT group_id FROM api_keys WHERE id = 3').fetchone(), (1,))
                 self.assertEqual(connection.execute('SELECT group_id FROM model_mappings WHERE id = 5').fetchone(), (1,))
                 self.assertEqual(connection.execute('SELECT account_id FROM model_routes WHERE model_mapping_id = 5').fetchone(), (7,))
-                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0012',))
+                self.assertEqual(connection.execute('SELECT version_num FROM alembic_version').fetchone(), ('0013',))
                 self.assertEqual(connection.execute('SELECT is_private FROM upstream_groups WHERE id = 1').fetchone(), (0,))
                 self.assertEqual(connection.execute('SELECT deleted_at FROM upstream_groups WHERE id = 1').fetchone(), (None,))
                 connection.execute("INSERT INTO upstream_groups (id, name, max_concurrency, enabled) VALUES (2, 'second', 10, 1)")

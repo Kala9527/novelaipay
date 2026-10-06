@@ -14,10 +14,21 @@ def current_user(
     session: str | None = Cookie(default=None, alias='nvp_session'),
     db: Session = Depends(get_db),
 ) -> User:
-    user_id = decode_session(session) if session else None
-    user = db.get(User, user_id) if user_id else None
-    if user is None or not user.is_active or user.deleted_at:
+    identity = decode_session(session) if session else None
+    user = db.get(User, identity[0]) if identity else None
+    if user is None or not user.is_active or user.deleted_at or user.session_version != identity[1]:
         raise HTTPException(401, 'Sign in required')
+    return user
+
+
+def optional_user(
+    session: str | None = Cookie(default=None, alias='nvp_session'),
+    db: Session = Depends(get_db),
+) -> User | None:
+    identity = decode_session(session) if session else None
+    user = db.get(User, identity[0]) if identity else None
+    if user is None or not user.is_active or user.deleted_at or user.session_version != identity[1]:
+        return None
     return user
 
 

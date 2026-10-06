@@ -26,6 +26,12 @@ class Registration(BaseModel):
     password: str = Field(min_length=12, max_length=200)
 
 
+class ProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    current_password: str | None = None
+    new_password: str | None = Field(default=None, min_length=12, max_length=200)
+
+
 def user_view(user: User) -> dict:
     return {
         'id': user.id, 'email': user.email, 'name': user.display_name,
@@ -37,7 +43,7 @@ def user_view(user: User) -> dict:
 
 def set_auth_cookies(response: Response, user: User) -> None:
     secure = get_settings().cookie_secure
-    response.set_cookie('nvp_session', create_session(user.id), httponly=True,
+    response.set_cookie('nvp_session', create_session(user.id, user.session_version), httponly=True,
                         secure=secure, samesite='lax', max_age=43200)
     response.set_cookie('nvp_csrf', secrets.token_urlsafe(24), httponly=False,
                         secure=secure, samesite='lax', max_age=43200)
@@ -85,4 +91,25 @@ def logout(response: Response, _: User = Depends(csrf_user)) -> dict:
 
 @router.get('/me')
 def me(user: User = Depends(current_user)) -> dict:
+    return user_view(user)
+
+
+@router.patch('/me')
+def update_profile(payload: ProfileUpdate, response: Response, user: User = Depends(csrf_user),
+                   db: Session = Depends(get_db)) -> dict:
+    if payload.name is None and payload.new_password is None:
+        raise HTTPException(422, 'Name or password required')
+    if payload.name is not None:
+        if not payload.name.strip():
+            raise HTTPException(422, 'Name required')
+        user.display_name = payload.name.strip()
+    if payload.new_password is not None:
+        if not payload.current_password or not verify_password(payload.current_password, user.password_hash):
+            raise HTTPException(403, 'Current password is incorrect')
+        user.password_hash = hash_password(payload.new_password)
+        user.session_version += 1
+    db.commit()
+    db.refresh(user)
+    if payload.new_password is not None:
+        set_auth_cookies(response, user)
     return user_view(user)

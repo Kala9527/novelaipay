@@ -105,6 +105,10 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class PasswordReset(BaseModel):
+    password: str = Field(min_length=12, max_length=200)
+
+
 class KeyIssue(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     group_id: int | None = None
@@ -201,6 +205,18 @@ def delete_user(user_id: int, _: User = Depends(admin_user), db: Session = Depen
         row.deleted_at = utcnow()
         for key in db.scalars(select(ApiKey).where(ApiKey.user_id == row.id, ApiKey.revoked_at.is_(None))):
             key.revoked_at = utcnow()
+    return {'ok': True}
+
+
+@router.post('/users/{user_id}/reset-password')
+def reset_user_password(user_id: int, payload: PasswordReset, _: User = Depends(admin_user),
+                        db: Session = Depends(get_db)) -> dict:
+    row = db.get(User, user_id)
+    if row is None or row.deleted_at:
+        raise HTTPException(404, 'User not found')
+    row.password_hash = hash_password(payload.password)
+    row.session_version += 1
+    db.commit()
     return {'ok': True}
 
 

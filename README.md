@@ -5,21 +5,23 @@ FastAPI + React/Vite/TypeScript image API console with NovelAI and OpenAI-compat
 ## Local development (Windows)
 
 ```powershell
-& 'D:\miniconda3\shell\condabin\conda-hook.ps1'
-conda activate 'D:\miniconda3_envs\novelaipay'
+conda create -n novelaipay python=3.13 pip -y
+conda activate novelaipay
+$env:PYTHONNOUSERSITE = '1'
 python -m pip install -r backend\requirements.txt
 npm ci --prefix frontend
 Copy-Item .env.example .env
 Copy-Item config.example.yaml config.yaml
 # Edit .env (secrets/DB) and config.yaml (admin account/registration).
 # For local SQLite use DATABASE_URL=sqlite:///./dev.db and COOKIE_SECURE=false.
-cd backend
-alembic upgrade head
-python -m app.bootstrap
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8009
+.\start.ps1
 ```
 
+`start.ps1` prepares a new database or upgrades an existing one, initializes the administrator, and starts the API and worker. `start.bat` calls the same launcher from Command Prompt. Both use port 8009 by default; pass `-Port` to choose another port.
+
 For frontend editing, run `npm run dev --prefix frontend` in a second terminal. Vite proxies API calls to port 8009. To serve the compiled frontend from FastAPI, run `npm run build --prefix frontend` and open `http://127.0.0.1:8009`.
+
+The model plaza at `/models` and public announcements are available before login. Signed-in users can also see private announcements and models in groups they are authorized to use. User Management at `/profile` lets every user, including the administrator, change their name and password. The administrator can reset ordinary user passwords and publish scheduled announcements in Management Settings. The API guide at `/api-guide` is available after login. The console displays and filters dates in Beijing time; announcement schedule inputs are Beijing time and stored as UTC.
 
 Set `UPSTREAM_KEY_ENCRYPTION_KEY` to a Fernet key generated with:
 
@@ -27,7 +29,7 @@ Set `UPSTREAM_KEY_ENCRYPTION_KEY` to a Fernet key generated with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-`config.yaml` is ignored by Git. Its `admin` section is the source of truth for the single administrator's email, display name and password. Re-run `python -m app.bootstrap` after changing it locally; Compose runs bootstrap when the API starts. Users can self-register when `registration.enabled` is true, or an administrator can add them. Administrator deletion is blocked; ordinary user deletion archives the account and preserves its balance, ledger and job history. The administrator can restore an archived account, then issue new API keys.
+`config.yaml` is ignored by Git. Its `admin` section supplies the initial administrator name and password; an existing administrator can change both in User Management without a restart reverting them. The configured email and concurrency limit are still applied at bootstrap. Compose runs bootstrap when the API starts. Users can self-register when `registration.enabled` is true, or an administrator can add them. Administrator deletion is blocked; ordinary user deletion archives the account and preserves its balance, ledger and job history. The administrator can restore an archived account, then issue new API keys.
 
 Create upstream accounts, then groups containing one or more accounts. Publish models and prices separately in each group; each model can map to a different upstream model name on each account. Both group and account capacity default to 10 running jobs. Downstream keys are scoped to one group, and multiple keys may use the same group. `/genarate` and `/v1/images/generations` accept a model from the key's group; `/v1/models` lists the models visible to that key. OpenAI-compatible account model lists are fetched from the upstream `/models` endpoint. NovelAI does not expose a model-list endpoint, so the console offers supported names and manual entry. Dates and date filters in the console use Beijing time. Administrators can filter and hide usage and billing rows; wallet balances and audit data remain unchanged.
 

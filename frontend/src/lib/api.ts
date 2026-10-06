@@ -15,3 +15,5 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 export const post = <T>(path: string, data: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(data) })
 export const formatMoney = (value: string | number) => `¥${Number(value).toFixed(2)}`
 export const formatDate = (value: string) => new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+export const beijingInput = (value: string | null) => value ? new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`).toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai', hour12: false }).slice(0, 16).replace(' ', 'T') : ''
+export const beijingToUtc = (value: string) => value ? new Date(`${value}+08:00`).toISOString() : null

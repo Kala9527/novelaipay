@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Activity, ArrowRight, LockKeyhole, Sparkles } from 'lucide-react'
+import { ArrowRight, LockKeyhole, Sparkles } from 'lucide-react'
 import { api, post } from '../lib/api'
 import { Notice } from '../components/UI'
+import { PublicHeader } from '../components/PublicHeader'
 
 export function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [registrationEnabled, setRegistrationEnabled] = useState(false)
@@ -26,7 +27,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
     finally { setBusy(false) }
   }
   return <div className="login-shell">
-    <div className="login-top"><span className="brand-mark"><Activity size={20} /></span><div><strong>Novelaipay</strong><small>AI IMAGE STUDIO</small></div></div>
+    <PublicHeader loggedIn={false} />
     <div className="login-main"><div className="login-intro"><div className="login-kicker"><Sparkles size={15} /> NOVELAI IMAGE STUDIO</div><h2>让想象<br /><em>成为画面。</em></h2><p>创作、查看与管理你的每一张生成图片。</p><div className="login-art" aria-hidden="true"><span className="login-art-frame frame-one" /><span className="login-art-frame frame-two" /><span className="login-art-frame frame-three" /></div></div>
     <div className="login-content">
       <div className="login-kicker"><LockKeyhole size={15} /> ACCOUNT ACCESS</div>

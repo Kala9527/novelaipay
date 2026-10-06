@@ -7,14 +7,20 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $backendRoot = Join-Path $projectRoot 'backend'
-$condaHook = 'D:\miniconda3\shell\condabin\conda-hook.ps1'
-$condaEnvironment = 'D:\miniconda3_envs\novelaipay'
+$condaEnvironment = 'novelaipay'
+$condaExe = if ($env:CONDA_EXE -and (Test-Path -LiteralPath $env:CONDA_EXE)) {
+    $env:CONDA_EXE
+} else {
+    (Get-Command conda.exe -ErrorAction Stop).Source
+}
+$condaBase = (& $condaExe info --base).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $condaBase) {
+    throw 'Unable to locate the Conda installation.'
+}
+$condaHook = Join-Path $condaBase 'shell\condabin\conda-hook.ps1'
 
 if (-not (Test-Path -LiteralPath $condaHook)) {
     throw "Conda hook not found: $condaHook"
-}
-if (-not (Test-Path -LiteralPath $condaEnvironment)) {
-    throw "Conda environment not found: $condaEnvironment"
 }
 foreach ($requiredFile in @('.env', 'config.yaml')) {
     if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $requiredFile))) {
@@ -24,31 +30,25 @@ foreach ($requiredFile in @('.env', 'config.yaml')) {
 
 & $condaHook
 conda activate $condaEnvironment
-if ($LASTEXITCODE -ne 0) {
+if ($env:CONDA_DEFAULT_ENV -ne $condaEnvironment -or -not $env:CONDA_PREFIX) {
     throw "Failed to activate Conda environment: $condaEnvironment"
 }
+$env:PYTHONNOUSERSITE = '1'
 
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($listener) {
-    $owners = $listener | Select-Object -ExpandProperty OwningProcess -Unique
-    foreach ($processId in $owners) {
-        Write-Host "Stopping process $processId on port $Port"
-        Stop-Process -Id $processId -Force -ErrorAction Stop
-    }
-    Start-Sleep -Seconds 1
-    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
-        throw "Port $Port is still in use after stopping its listener."
-    }
+    $owners = ($listener | Select-Object -ExpandProperty OwningProcess -Unique) -join ', '
+    throw "Port $Port is already in use by process(es) $owners."
 }
 
-$python = (Get-Command python -ErrorAction Stop).Source
-if (-not $python.StartsWith($condaEnvironment, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Activated Python is outside the expected environment: $python"
+$python = Join-Path $env:CONDA_PREFIX 'python.exe'
+if (-not (Test-Path -LiteralPath $python)) {
+    throw "Python not found in Conda environment: $env:CONDA_PREFIX"
 }
 
 Push-Location $backendRoot
 try {
-    & $python -m alembic upgrade head
+    & $python -m app.prepare_db
     if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
 
     & $python -m app.bootstrap

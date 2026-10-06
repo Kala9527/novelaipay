@@ -10,6 +10,13 @@ import { JobsPage } from './pages/JobsPage'
 import { UsagePage } from './pages/UsagePage'
 import { BillingRecordsPage } from './pages/BillingRecordsPage'
 import { AdminPage } from './pages/AdminPage'
+import { ApiGuidePage } from './pages/ApiGuidePage'
+import { ModelPlazaPage } from './pages/ModelPlazaPage'
+import { ProfilePage } from './pages/ProfilePage'
+import { PublicHeader } from './components/PublicHeader'
+import { Outlet } from 'react-router-dom'
+
+function PublicLayout() { return <><PublicHeader loggedIn={false} /><Outlet /></> }
 
 export function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -24,12 +31,17 @@ export function App() {
   if (loading) return <div className="loading">正在加载 Novelaipay...</div>
   return <Routes>
     <Route path="/login" element={user ? <Navigate to="/" /> : <LoginPage onLogin={refresh} />} />
+    <Route element={user ? <Layout user={user} onLogout={signedOut} /> : <PublicLayout />}>
+      <Route path="/models" element={<ModelPlazaPage />} />
+    </Route>
     <Route element={user ? <Layout user={user} onLogout={signedOut} /> : <Navigate to="/login" />}>
       <Route path="/" element={<DashboardPage user={user!} />} />
       <Route path="/keys" element={<KeysPage />} />
       <Route path="/workshop" element={<JobsPage userId={user?.id ?? 0} />} />
       <Route path="/jobs" element={<UsagePage isAdmin={user?.is_admin ?? false} />} />
       <Route path="/billing" element={<BillingRecordsPage isAdmin={user?.is_admin ?? false} />} />
+      <Route path="/profile" element={<ProfilePage user={user!} onUpdated={refresh} />} />
+      <Route path="/api-guide" element={<ApiGuidePage />} />
       <Route path="/admin" element={user?.is_admin ? <AdminPage /> : <Navigate to="/" />} />
     </Route>
     <Route path="*" element={<Navigate to="/" />} />

@@ -5,17 +5,19 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import admin, auth, generation, payment, user, tavern
+from .api import admin, auth, catalog, generation, payment, user, tavern
 from .config import get_settings
 
 
-app = FastAPI(title='Novelaipay', version='0.2.0')
+app = FastAPI(title='Novelaipay', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware,
                    allow_origins=[origin.strip() for origin in get_settings().cors_allowed_origins.split(',')
                                   if origin.strip()],
                    allow_methods=['GET', 'POST', 'OPTIONS'],
                    allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key'])
 app.include_router(auth.router)
+app.include_router(catalog.public_router)
+app.include_router(catalog.admin_router)
 app.include_router(user.router)
 app.include_router(admin.router)
 app.include_router(payment.router)

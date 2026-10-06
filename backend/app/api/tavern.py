@@ -123,7 +123,6 @@ def normalize_request(body: dict) -> tuple[str, str, str, ImageParameters]:
 
 
 @router.get('/v1/models')
-@router.get('/models')
 @router.get('/genarate/models')
 @router.get('/genarate/v1/models')
 def tavern_models(api_key: ApiKey = Depends(downstream_key), db: Session = Depends(get_db)) -> dict:
@@ -173,7 +172,8 @@ def tavern_generate(body: dict, request: Request, api_key: ApiKey = Depends(down
         'iat': now, 'exp': now + timedelta(minutes=15),
     }, get_settings().app_secret_key, algorithm='HS256')
     image_url = str(request.url_for('tavern_image', job_id=job.id).include_query_params(token=image_token))
-    return {'created': int(job.created_at.timestamp()), 'model': model,
+    created_at = job.created_at if job.created_at.tzinfo else job.created_at.replace(tzinfo=timezone.utc)
+    return {'created': int(created_at.timestamp()), 'model': model,
             'url': image_url, 'image_url': image_url,
             'data': [{'url': image_url, 'b64_json': encoded}], 'images': [image_url],
             'image': image_url, 'job_id': job.id, 'anlas_charged': job.anlas_cost,

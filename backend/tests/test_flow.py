@@ -8,6 +8,7 @@ import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 import httpx
@@ -22,6 +23,7 @@ os.environ.update({
     'PAYMENT_WEBHOOK_SECRET': 'test-payment-secret',
     'DATABASE_URL': 'sqlite://',
     'COOKIE_SECURE': 'false',
+    'CORS_ALLOWED_ORIGINS': 'http://127.0.0.1:8009,http://localhost:8009',
     'CONFIG_FILE': str(Path(__file__).resolve().parent / 'config.test.yaml'),
 })
 
@@ -31,7 +33,7 @@ from app import db
 from app.bootstrap import main as bootstrap_admin
 from app.config import AdminConfig, RegistrationConfig, get_business_config
 from app.main import app
-from app.models import Base, GenerationJob, JobStatus, UpstreamAccount, UsageRecord, utcnow
+from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
 from app.models import User
 from app.security import verify_password
 from app.services import claim_job, recover_expired
@@ -68,6 +70,125 @@ class FlowTest(unittest.TestCase):
     def admin_patch(self, path, payload):
         return self.client.patch(path, json=payload, headers={'X-CSRF-Token': self.client.cookies['nvp_csrf']})
 
+    def test_profile_and_password_reset(self):
+        registered = self.client.post('/api/auth/register', json={
+            'name': 'First Name', 'email': 'profile@example.com', 'password': 'initial-password-123',
+        })
+        self.assertEqual(registered.status_code, 200, registered.text)
+        user_id = registered.json()['id']
+        old_session = self.client.cookies['nvp_session']
+        self.assertEqual(self.client.patch('/api/auth/me', json={'name': 'Second Name'}).status_code, 403)
+        self.assertEqual(self.admin_patch('/api/auth/me', {'name': 'Second Name'}).json()['name'], 'Second Name')
+        self.assertEqual(self.admin_patch('/api/auth/me', {
+            'current_password': 'wrong-password', 'new_password': 'new-password-12345',
+        }).status_code, 403)
+        changed = self.admin_patch('/api/auth/me', {
+            'current_password': 'initial-password-123', 'new_password': 'new-password-12345',
+        })
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.client.cookies.set('nvp_session', old_session)
+        self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'email': 'profile@example.com', 'password': 'initial-password-123',
+        }).status_code, 401)
+        self.login('profile@example.com', 'new-password-12345')
+        self.assertEqual(self.client.get('/api/auth/me').json()['name'], 'Second Name')
+        self.client.cookies.clear()
+        self.login('admin@example.com', 'long-test-password')
+        updated_admin = self.admin_patch('/api/auth/me', {
+            'name': 'Updated Administrator', 'current_password': 'long-test-password',
+            'new_password': 'updated-admin-password-123',
+        })
+        self.assertEqual(updated_admin.status_code, 200, updated_admin.text)
+        bootstrap_admin()
+        self.assertEqual(self.client.get('/api/auth/me').json()['name'], 'Updated Administrator')
+        self.client.cookies.clear()
+        self.login('admin@example.com', 'updated-admin-password-123')
+        reset = self.admin_post(f'/api/admin/users/{user_id}/reset-password', {'password': 'admin-reset-12345'})
+        self.assertEqual(reset.status_code, 200, reset.text)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'email': 'profile@example.com', 'password': 'new-password-12345',
+        }).status_code, 401)
+        self.login('profile@example.com', 'admin-reset-12345')
+
+    def test_public_model_catalog_respects_private_groups(self):
+        with db.SessionLocal.begin() as session:
+            account = UpstreamAccount(name='catalog-account', base_url='https://example.com', encrypted_key='test')
+            disabled = UpstreamAccount(name='disabled-account', base_url='https://example.com',
+                                       encrypted_key='test', enabled=False)
+            public = UpstreamGroup(name='Public Group')
+            private = UpstreamGroup(name='Private Group', is_private=True)
+            session.add_all([account, disabled, public, private])
+            session.flush()
+            for group, name in ((public, 'public-model'), (private, 'private-model')):
+                mapping = ModelMapping(group_id=group.id, public_name=name, upstream_model=name,
+                                       upstream_account_id=disabled.id)
+                session.add(mapping)
+                session.flush()
+                session.add(ModelRoute(model_mapping_id=mapping.id, account_id=account.id,
+                                       upstream_model=name))
+                session.add(PriceVersion(model_mapping_id=mapping.id, amount=Decimal('0.2500')))
+            private_id = private.id
+        anonymous = self.client.get('/api/public/models')
+        self.assertEqual(anonymous.status_code, 200, anonymous.text)
+        self.assertEqual([row['name'] for row in anonymous.json()], ['public-model'])
+        plaza = self.client.get('/models')
+        self.assertEqual(plaza.status_code, 200, plaza.text)
+        self.assertIn('<div id="root"></div>', plaza.text)
+        registered = self.client.post('/api/auth/register', json={
+            'name': 'Catalog User', 'email': 'catalog@example.com', 'password': 'catalog-password-123',
+        })
+        self.assertEqual(registered.status_code, 200, registered.text)
+        self.assertEqual(len(self.client.get('/api/public/models').json()), 1)
+        with db.SessionLocal.begin() as session:
+            session.add(GroupMember(group_id=private_id, user_id=registered.json()['id']))
+        rows = self.client.get('/api/public/models').json()
+        self.assertEqual({row['name'] for row in rows}, {'public-model', 'private-model'})
+        self.assertEqual(next(row for row in rows if row['is_private'])['group_name'], 'Private Group')
+
+    def test_announcement_audience_and_beijing_schedule(self):
+        self.login('admin@example.com', 'long-test-password')
+        now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
+        def create(title, private=False, start=None, end=None):
+            result = self.admin_post('/api/admin/announcements', {
+                'title': title, 'body': f'{title} body', 'is_private': private,
+                'starts_at': start.isoformat() if start else None,
+                'ends_at': end.isoformat() if end else None,
+            })
+            self.assertEqual(result.status_code, 200, result.text)
+            return result.json()
+        public = create('Public', end=now + timedelta(hours=1))
+        create('Private', private=True)
+        create('Future', start=now + timedelta(hours=1))
+        create('Expired', start=now - timedelta(hours=2), end=now - timedelta(hours=1))
+        temporary = create('Temporary')
+        self.assertEqual(self.client.delete(f'/api/admin/announcements/{temporary["id"]}', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).status_code, 200)
+        revised = self.admin_patch(f'/api/admin/announcements/{public["id"]}', {
+            'title': 'Revised', 'body': 'New text', 'is_private': False,
+            'ends_at': (now + timedelta(hours=1)).isoformat(),
+        })
+        self.assertEqual(revised.status_code, 200, revised.text)
+        self.assertEqual(len(self.client.get('/api/admin/announcements', headers={
+            'X-CSRF-Token': self.client.cookies['nvp_csrf'],
+        }).json()), 4)
+        self.assertEqual(self.admin_post('/api/admin/announcements', {
+            'title': 'Naive', 'body': 'Invalid', 'starts_at': '2026-10-06T12:00:00',
+        }).status_code, 422)
+        self.client.cookies.clear()
+        self.assertEqual([row['title'] for row in self.client.get('/api/public/announcements').json()], ['Revised'])
+        self.client.post('/api/auth/register', json={
+            'name': 'Notice User', 'email': 'notices@example.com', 'password': 'notice-password-123',
+        })
+        self.assertEqual({row['title'] for row in self.client.get('/api/public/announcements').json()},
+                         {'Revised', 'Private'})
+        self.assertEqual(self.admin_patch(f'/api/admin/announcements/{public["id"]}', {
+            'title': 'Wrong Role', 'body': 'Not allowed',
+        }).status_code, 403)
+
     def test_admin_configuration_updates_single_administrator(self):
         changed = get_business_config().model_copy(update={
             'admin': AdminConfig(email='root@example.com', name='New Administrator',
@@ -79,9 +200,9 @@ class FlowTest(unittest.TestCase):
             administrators = session.scalars(select(User).where(User.is_admin.is_(True))).all()
             self.assertEqual(len(administrators), 1)
             self.assertEqual(administrators[0].email, 'root@example.com')
-            self.assertEqual(administrators[0].display_name, 'New Administrator')
+            self.assertEqual(administrators[0].display_name, 'Test Administrator')
             self.assertEqual(administrators[0].max_concurrency, 7)
-            self.assertTrue(verify_password('replacement-password-123', administrators[0].password_hash))
+            self.assertTrue(verify_password('long-test-password', administrators[0].password_hash))
 
     def test_registration_user_management_and_key_distribution(self):
         self.assertEqual(self.client.get('/api/auth/options').json(), {'registration_enabled': True})
@@ -679,12 +800,12 @@ class FlowTest(unittest.TestCase):
             {'id': name, 'object': 'model', 'owned_by': 'novelaipay'}
             for name in ('nai-diffusion-4-5-full', 'tavern-anime')]})
         preflight = self.client.options(path, headers={
-            'Origin': 'http://127.0.0.1:8000',
+            'Origin': 'http://127.0.0.1:8009',
             'Access-Control-Request-Method': 'GET',
             'Access-Control-Request-Headers': 'authorization',
         })
         self.assertEqual(preflight.status_code, 200, preflight.text)
-        self.assertEqual(preflight.headers['access-control-allow-origin'], 'http://127.0.0.1:8000')
+        self.assertEqual(preflight.headers['access-control-allow-origin'], 'http://127.0.0.1:8009')
         self.assertEqual(self.client.get('/genarate/unknown').status_code, 404)
 
     def test_novelai_proxy_returns_zip_and_charges_actual_anlas(self):
@@ -783,6 +904,7 @@ class FlowTest(unittest.TestCase):
                 response = self.client.post('/genarate', json=body,
                                             headers={'Authorization': 'Bearer ' + key})
                 self.assertEqual(response.status_code, 200, response.text)
+                self.assertLess(abs(response.json()['created'] - time.time()), 30)
                 image_url = response.json()['url']
                 self.assertEqual(response.json()['data'][0]['url'], image_url)
                 self.assertEqual(self.client.get(image_url).status_code, 200)

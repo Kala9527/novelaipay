@@ -33,19 +33,20 @@ def hash_api_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def create_session(user_id: int) -> str:
+def create_session(user_id: int, session_version: int = 0) -> str:
     now = datetime.now(timezone.utc)
     return jwt.encode(
-        {'sub': str(user_id), 'iat': now, 'exp': now + timedelta(hours=12), 'type': 'session'},
+        {'sub': str(user_id), 'sv': session_version, 'iat': now,
+         'exp': now + timedelta(hours=12), 'type': 'session'},
         get_settings().app_secret_key,
         algorithm='HS256',
     )
 
 
-def decode_session(token: str) -> int | None:
+def decode_session(token: str) -> tuple[int, int] | None:
     try:
         payload = jwt.decode(token, get_settings().app_secret_key, algorithms=['HS256'])
-        return int(payload['sub']) if payload.get('type') == 'session' else None
+        return (int(payload['sub']), int(payload.get('sv', 0))) if payload.get('type') == 'session' else None
     except (jwt.InvalidTokenError, KeyError, ValueError):
         return None
 

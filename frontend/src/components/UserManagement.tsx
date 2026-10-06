@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Check, ChevronLeft, ChevronRight, Copy, KeyRound, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, Copy, KeyRound, LockKeyhole, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { api, formatDate, formatMoney, post } from '../lib/api'
 import type { AdminUser, Group, Key } from '../types'
 import { Empty, Notice } from './UI'
@@ -18,6 +18,7 @@ export function UserManagement() {
   const [keyName, setKeyName] = useState('')
   const [keyGroupId, setKeyGroupId] = useState('')
   const [editing, setEditing] = useState<{ id: number; name: string; email: string; max_concurrency: number } | null>(null)
+  const [reset, setReset] = useState<{ id: number; name: string; password: string; confirm: string } | null>(null)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
 
@@ -59,6 +60,13 @@ export function UserManagement() {
       method: 'PATCH', body: JSON.stringify({ name: editing.name, email: editing.email,
         max_concurrency: editing.max_concurrency }),
     }))) setEditing(null)
+  }
+
+  async function resetPassword(event: FormEvent) {
+    event.preventDefault()
+    if (!reset) return
+    if (reset.password !== reset.confirm) { setError('两次输入的密码不一致'); return }
+    if (await run(() => post(`/api/admin/users/${reset.id}/reset-password`, { password: reset.password }), '密码已重置，原登录会话已失效')) setReset(null)
   }
 
   async function toggle(user: AdminUser) {
@@ -129,9 +137,10 @@ export function UserManagement() {
     </form></section>}
 
     {editing && <section id="admin-editor" className="admin-edit-section"><div className="admin-edit-heading"><h3>编辑用户 · {editing.name}</h3><button type="button" className="icon-button" title="关闭" onClick={() => setEditing(null)}><X size={17} /></button></div><form className="form-grid" onSubmit={updateUser}><label>名称<input required value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} /></label><label>邮箱<input required type="email" value={editing.email} onChange={e => setEditing({ ...editing, email: e.target.value })} /></label><label>最大并发数<input required type="number" min="1" max="100" value={editing.max_concurrency} onChange={e => setEditing({ ...editing, max_concurrency: Number(e.target.value) })} /></label><div className="admin-form-actions"><button className="button primary"><Check size={16} />保存用户</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div></form></section>}
+    {reset && <section id="admin-editor" className="admin-edit-section"><div className="admin-edit-heading"><h3>重置密码 · {reset.name}</h3><button type="button" className="icon-button" title="关闭" onClick={() => setReset(null)}><X size={17} /></button></div><form className="form-grid" onSubmit={resetPassword}><label>新密码<input required type="password" autoComplete="new-password" minLength={12} maxLength={200} value={reset.password} onChange={e => setReset({ ...reset, password: e.target.value })} /></label><label>确认新密码<input required type="password" autoComplete="new-password" minLength={12} value={reset.confirm} onChange={e => setReset({ ...reset, confirm: e.target.value })} /></label><div className="admin-form-actions"><button className="button primary"><LockKeyhole size={16} />重置密码</button><button type="button" className="button secondary" onClick={() => setReset(null)}>取消</button></div></form></section>}
     {visibleUsers.length ? <div className="table-scroll admin-table"><table><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>余额</th><th>预留</th><th className="right">操作</th></tr></thead><tbody>{visibleUsers.map(user => <tr key={user.id}>
       <td><strong>{user.name || user.email}</strong><div className="muted">{user.email}</div></td><td>{user.is_admin ? '管理员' : '普通用户'}</td><td>{user.deleted_at ? '已删除' : user.is_active ? '启用' : '禁用'}</td><td>{formatMoney(user.balance)}</td><td>{formatMoney(user.reserved)}</td>
-      <td className="right"><div className="admin-row-actions">{user.deleted_at ? <button className="icon-button" title="恢复用户" onClick={() => restore(user)}><RotateCcw size={16} /></button> : <>{!user.is_admin && <><button className="icon-button" title="编辑用户" onClick={() => { setPanel(null); setEditing({ id: user.id, name: user.name, email: user.email, max_concurrency: user.max_concurrency }) }}><Pencil size={16} /></button><button className="icon-button" title={user.is_active ? '禁用用户' : '启用用户'} onClick={() => toggle(user)}>{user.is_active ? <X size={16} /> : <Check size={16} />}</button><button className="icon-button danger" title="删除用户" onClick={() => remove(user)}><Trash2 size={16} /></button></>}<button className="icon-button" title="管理密钥" onClick={() => { setSelectedId(user.id); setKeyGroupId(''); loadKeys(user.id) }}><KeyRound size={16} /></button></>}</div></td>
+      <td className="right"><div className="admin-row-actions">{user.deleted_at ? <button className="icon-button" title="恢复用户" onClick={() => restore(user)}><RotateCcw size={16} /></button> : <>{!user.is_admin && <><button className="icon-button" title="编辑用户" onClick={() => { setPanel(null); setReset(null); setEditing({ id: user.id, name: user.name, email: user.email, max_concurrency: user.max_concurrency }) }}><Pencil size={16} /></button><button className="icon-button" title="重置密码" onClick={() => { setPanel(null); setEditing(null); setReset({ id: user.id, name: user.name || user.email, password: '', confirm: '' }) }}><LockKeyhole size={16} /></button><button className="icon-button" title={user.is_active ? '禁用用户' : '启用用户'} onClick={() => toggle(user)}>{user.is_active ? <X size={16} /> : <Check size={16} />}</button><button className="icon-button danger" title="删除用户" onClick={() => remove(user)}><Trash2 size={16} /></button></>}<button className="icon-button" title="管理密钥" onClick={() => { setSelectedId(user.id); setKeyGroupId(''); loadKeys(user.id) }}><KeyRound size={16} /></button></>}</div></td>
     </tr>)}</tbody></table></div> : <Empty text="暂无用户" />}
     <div className="admin-pagination"><span>第 {page + 1} 页</span><button className="icon-button" title="上一页" disabled={page === 0} onClick={() => setPage(current => current - 1)}><ChevronLeft size={17} /></button><button className="icon-button" title="下一页" disabled={users.length < 50} onClick={() => setPage(current => current + 1)}><ChevronRight size={17} /></button></div>
 

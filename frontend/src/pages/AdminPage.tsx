@@ -4,8 +4,9 @@ import { api, formatDate, formatMoney, post } from '../lib/api'
 import type { Group, GroupRecipient, Job, Mapping, Upstream } from '../types'
 import { Empty, Notice, PageHeader, Status } from '../components/UI'
 import { UserManagement } from '../components/UserManagement'
+import { AnnouncementManagement } from '../components/AnnouncementManagement'
 
-type Tab = 'models' | 'groups' | 'accounts' | 'users' | 'reconcile'
+type Tab = 'models' | 'groups' | 'accounts' | 'users' | 'announcements' | 'reconcile'
 const emptyGroup = () => ({ id: null as number | null, name: '', max_concurrency: 10, account_ids: [] as number[], member_ids: [] as number[], is_private: false, enabled: true })
 const emptyAccount = () => ({ id: null as number | null, name: '', base_url: 'https://image.novelai.net', api_key: '', provider: 'novelai', opus_free: false, max_concurrency: 10, enabled: true })
 const emptyMapping = () => ({ id: null as number | null, public_name: '', upstream_account_id: '', upstream_model: '', price: '', extra_amount: '0.1', enabled: true })
@@ -117,7 +118,7 @@ export function AdminPage() {
 
   return <div className="page admin-page">
     <PageHeader title="管理设置" subtitle="配置分组、上游和模型定价" action={<button className="button secondary" onClick={load}><RefreshCw size={16} />刷新</button>} />
-    <div className="tabs">{([['models', '模型与定价'], ['groups', '分组'], ['accounts', '上游账户'], ['users', '用户与余额'], ['reconcile', `待核对 (${uncertain.length})`]] as [Tab, string][]).map(([key, label]) => <button key={key} className={tab === key ? 'tab active' : 'tab'} onClick={() => { setTab(key); setEditor(null); setSearch(''); setError(''); setMessage('') }}>{label}</button>)}</div>
+    <div className="tabs">{([['models', '模型与定价'], ['groups', '分组'], ['accounts', '上游账户'], ['users', '用户与余额'], ['announcements', '公告'], ['reconcile', `待核对 (${uncertain.length})`]] as [Tab, string][]).map(([key, label]) => <button key={key} className={tab === key ? 'tab active' : 'tab'} onClick={() => { setTab(key); setEditor(null); setSearch(''); setError(''); setMessage('') }}>{label}</button>)}</div>
     {error && <Notice text={error} error />}{message && <Notice text={message} />}
 
     {tab === 'groups' && <>
@@ -170,6 +171,8 @@ export function AdminPage() {
     </>}
 
     {tab === 'users' && <UserManagement />}
+
+    {tab === 'announcements' && <AnnouncementManagement />}
 
     {tab === 'reconcile' && <>
       <div className="admin-toolbar"><div><h2>待核对任务</h2><span>{uncertain.length} 项</span></div></div>
