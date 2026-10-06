@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react'
 import { usePreferences } from '../lib/preferences'
 import studioArt from '../assets/studio-art.jpg'
@@ -22,6 +22,9 @@ export function WelcomeCarousel() {
   const [hovered, setHovered] = useState(false)
   const [focused, setFocused] = useState(false)
   const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  const [hidden, setHidden] = useState(document.visibilityState !== 'visible')
+  const remaining = useRef(5000)
+  const previousActive = useRef(active)
   const label = labels[locale]
 
   useEffect(() => {
@@ -31,20 +34,32 @@ export function WelcomeCarousel() {
     return () => media.removeEventListener('change', update)
   }, [])
   useEffect(() => {
-    if (paused || hovered || focused || reducedMotion) return
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') setActive(current => (current + 1) % slides.length)
-    }, 5000)
-    return () => window.clearInterval(timer)
-  }, [paused, hovered, focused, reducedMotion, active])
+    const update = () => setHidden(document.visibilityState !== 'visible')
+    document.addEventListener('visibilitychange', update)
+    return () => document.removeEventListener('visibilitychange', update)
+  }, [])
+  useEffect(() => {
+    if (previousActive.current !== active) {
+      remaining.current = 5000
+      previousActive.current = active
+    }
+    if (paused || hovered || focused || reducedMotion || hidden) return
+    const started = performance.now()
+    const timer = window.setTimeout(() => setActive(current => (current + 1) % slides.length), remaining.current)
+    return () => {
+      window.clearTimeout(timer)
+      remaining.current = Math.max(0, remaining.current - (performance.now() - started))
+    }
+  }, [paused, hovered, focused, reducedMotion, hidden, active])
 
   function move(offset: number) { setActive(current => (current + offset + slides.length) % slides.length) }
 
-  return <section className={`mirror-carousel ${paused || hovered || focused ? 'is-paused' : ''}`} aria-label={label.carousel}
+  return <section className={`mirror-carousel ${paused || hovered || focused || reducedMotion || hidden ? 'is-paused' : ''}`} aria-label={label.carousel}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
     onFocusCapture={() => setFocused(true)}
     onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
     <div className="mirror-stage" aria-hidden="true">
+      <span className="mirror-stage-count">{slides[active].number}<span> / {String(slides.length).padStart(2, '0')}</span></span>
       {slides.map((slide, index) => {
         const place = index === active ? 'active' : index === (active + 1) % slides.length ? 'next' : 'previous'
         return <div className={`mirror-slide mirror-slide-${place}`} key={slide.number}>
@@ -56,8 +71,16 @@ export function WelcomeCarousel() {
       <span className="mirror-stage-line mirror-stage-line-bottom" />
     </div>
     <div className="mirror-controls">
-      <div className="mirror-pagination" aria-label={label.carousel}>{slides.map((slide, index) => <button key={slide.number} type="button" className={index === active ? 'active' : ''} aria-label={label.slide(index + 1)} aria-current={index === active ? 'true' : undefined} title={label.slide(index + 1)} onClick={() => setActive(index)}><span>{slide.number}</span></button>)}</div>
-      <div className="mirror-actions"><button type="button" className="icon-button" aria-label={label.previous} title={label.previous} onClick={() => move(-1)}><ChevronLeft size={17} /></button><button type="button" className="icon-button" aria-label={paused ? label.play : label.pause} title={paused ? label.play : label.pause} onClick={() => setPaused(value => !value)}>{paused ? <Play size={15} /> : <Pause size={15} />}</button><button type="button" className="icon-button" aria-label={label.next} title={label.next} onClick={() => move(1)}><ChevronRight size={17} /></button></div>
+      <div className="mirror-pagination" aria-label={label.carousel}>
+        {slides.map((slide, index) => <button key={slide.number} type="button" className={index === active ? 'active' : ''} aria-label={label.slide(index + 1)} aria-current={index === active ? 'true' : undefined} title={label.slide(index + 1)} onClick={() => setActive(index)}>
+          <span className="mirror-page-number">{slide.number}</span><span className="mirror-page-track">{index === active && <span key={active} className="mirror-page-progress" />}</span>
+        </button>)}
+      </div>
+      <div className="mirror-actions">
+        <button type="button" className="mirror-action" aria-label={label.previous} title={label.previous} onClick={() => move(-1)}><ChevronLeft size={18} /></button>
+        <button type="button" className="mirror-action mirror-action-play" aria-label={paused ? label.play : label.pause} title={paused ? label.play : label.pause} onClick={() => setPaused(value => !value)}>{paused ? <Play size={16} fill="currentColor" /> : <Pause size={16} fill="currentColor" />}</button>
+        <button type="button" className="mirror-action" aria-label={label.next} title={label.next} onClick={() => move(1)}><ChevronRight size={18} /></button>
+      </div>
     </div>
   </section>
 }

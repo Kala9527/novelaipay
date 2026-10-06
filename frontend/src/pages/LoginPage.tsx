@@ -6,6 +6,7 @@ import { PublicHeader } from '../components/PublicHeader'
 import { Link } from 'react-router-dom'
 import { usePreferences } from '../lib/preferences'
 import { WelcomeCarousel } from '../components/WelcomeCarousel'
+import { WelcomeAtmosphere } from '../components/WelcomeAtmosphere'
 
 export function LoginPage({ onLogin }: { onLogin: () => void }) {
   const { t } = usePreferences()
@@ -44,6 +45,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
     finally { setBusy(false) }
   }
   return <div className="login-shell">
+    <WelcomeAtmosphere />
     <PublicHeader loggedIn={false} />
     <div className="login-main"><div className="login-intro"><div className="login-kicker"><Sparkles size={15} /> YUNZHANCLOUD · IMAGE API</div><h2>{t('loginHeroTitle')}</h2><p>{t('loginHeroBody')}</p><div className="login-intro-actions"><Link to="/models" className="button secondary">{t('exploreModels')}<ArrowRight size={16} /></Link><a href="#login-form" className="text-link">{t('jumpIn')}<ArrowRight size={16} /></a></div><WelcomeCarousel /></div>
     <div className="login-content">
