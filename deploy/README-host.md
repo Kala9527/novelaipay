@@ -16,6 +16,8 @@ sudo -u novelaipay cp config.example.yaml config.yaml
 
 编辑 `.env` 中的数据库凭据、`APP_SECRET_KEY`、`UPSTREAM_KEY_ENCRYPTION_KEY` 和 `PAYMENT_WEBHOOK_SECRET`，以及 `config.yaml` 中的管理员信息。Fernet 密钥可用 `python3.13 -c 'import os,base64; print(base64.urlsafe_b64encode(os.urandom(32)).decode())'` 生成；各密钥使用不同随机值。确保文件属主为 `novelaipay`，权限为 600，且 `DATABASE_URL` 未设置，否则它会覆盖 `DB_HOST`/`DB_PORT`。
 
+若添加出口代理时报 `Fernet key must be 32 url-safe base64-encoded bytes`，说明宿主机 `.env` 的 `UPSTREAM_KEY_ENCRYPTION_KEY` 格式错误，与代理地址无关。先在 `backend` 目录运行 `../.venv/bin/python -c 'from app.config import get_settings; get_settings(); print("encryption key OK")'` 检查配置。首次部署且尚无已加密的上游密钥、代理地址或 SMTP 密码时，可用上面的命令生成新 key，替换 `.env` 中的占位值，再重启 API 和 Worker。已有加密数据时必须找回原来的 Fernet key；随意换 key 会使现有密文无法解密。
+
 如果 PostgreSQL 使用 Docker，保持 `.env` 中 `DB_HOST=127.0.0.1`、`DB_PORT=5433`、`DB_BIND_PORT=5433`，运行：
 
 ```bash

@@ -1,8 +1,10 @@
+import binascii
 from functools import lru_cache
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, EmailStr, Field, ValidationError
+from cryptography.fernet import Fernet
+from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -25,6 +27,18 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 180
     job_poll_seconds: int = 3
     cors_allowed_origins: str = 'http://127.0.0.1:8009,http://localhost:8009'
+
+    @field_validator('upstream_key_encryption_key')
+    @classmethod
+    def validate_upstream_key_encryption_key(cls, value: str) -> str:
+        try:
+            Fernet(value.encode())
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(
+                'UPSTREAM_KEY_ENCRYPTION_KEY must be a Fernet key (32 URL-safe base64-encoded bytes); '
+                'generate one with Fernet.generate_key() and keep the existing key if data is already encrypted'
+            ) from exc
+        return value
 
     @property
     def sqlalchemy_url(self) -> URL | str:

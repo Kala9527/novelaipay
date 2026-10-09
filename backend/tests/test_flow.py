@@ -29,10 +29,11 @@ os.environ.update({
 })
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app import db
 from app.bootstrap import main as bootstrap_admin
-from app.config import AdminConfig, RegistrationConfig, get_business_config
+from app.config import AdminConfig, RegistrationConfig, Settings, get_business_config
 from app.main import app
 from app.models import Base, GenerationJob, GroupMember, JobStatus, ModelMapping, ModelRoute, PriceVersion, ProxyEndpoint, RedemptionCode, RegistrationCode, RegistrationSettings, UpstreamAccount, UpstreamGroup, UsageRecord, utcnow
 from app.models import User
@@ -46,6 +47,12 @@ from app.proxy import request as upstream_request
 from app.security import encrypt_upstream_key
 from app.registration_email import DEFAULT_TEMPLATE, LEGACY_TEMPLATE, registration_settings, render_template
 import base64
+
+
+class SettingsTest(unittest.TestCase):
+    def test_invalid_encryption_key_has_actionable_error(self):
+        with self.assertRaisesRegex(ValidationError, 'UPSTREAM_KEY_ENCRYPTION_KEY must be a Fernet key'):
+            Settings(upstream_key_encryption_key='replace_with_fernet_key', _env_file=None)
 
 
 class FlowTest(unittest.TestCase):
