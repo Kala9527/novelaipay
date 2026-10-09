@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Grid2X2, List, RotateCcw, Search, Store, X } from 'lucide-react'
 import { api, formatMoney } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import type { PlazaModel } from '../types'
 import { Empty, Notice } from '../components/UI'
 import { usePreferences } from '../lib/preferences'
@@ -51,7 +52,7 @@ export function ModelPlazaPage() {
   function toggleSection(key: keyof typeof expanded) { setExpanded(current => ({ ...current, [key]: !current[key] })) }
   async function copyName(name: string) {
     try {
-      await navigator.clipboard.writeText(name)
+      await copyText(name)
       setCopiedName(name)
       window.setTimeout(() => setCopiedName(current => current === name ? null : current), 1800)
     } catch { setCopiedName(null) }

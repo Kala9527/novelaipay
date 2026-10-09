@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Check, ChevronLeft, ChevronRight, Copy, KeyRound, LockKeyhole, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { api, formatDate, formatMoney, post } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import type { AdminUser, Group, Key } from '../types'
 import { Empty, Notice } from './UI'
 
@@ -21,6 +22,8 @@ export function UserManagement() {
   const [reset, setReset] = useState<{ id: number; name: string; password: string; confirm: string } | null>(null)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [manualKey, setManualKey] = useState('')
+  useEffect(() => { setManualKey('') }, [selectedId])
 
   function loadUsers() { api<AdminUser[]>(`/api/admin/users?include_deleted=${showDeleted}&search=${encodeURIComponent(search)}&offset=${page * 50}&limit=50`).then(setUsers).catch(e => setError(e.message)) }
   function loadKeys(id: number) { api<Key[]>(`/api/admin/users/${id}/keys`).then(setKeys).catch(e => setError(e.message)) }
@@ -96,7 +99,7 @@ export function UserManagement() {
   async function issue(event: FormEvent) {
     event.preventDefault()
     if (!selectedId) return
-    setError(''); setMessage('')
+    setError(''); setMessage(''); setManualKey('')
     try {
       await post<Key>(`/api/admin/users/${selectedId}/keys`, { name: keyName, group_id: Number(keyGroupId) })
       setKeyName('')
@@ -107,16 +110,22 @@ export function UserManagement() {
 
   async function revoke(keyId: number) {
     if (!selectedId || !window.confirm('撤销此密钥？')) return
+    setManualKey('')
     await run(() => api(`/api/admin/users/${selectedId}/keys/${keyId}`, { method: 'DELETE' }), '密钥已撤销')
   }
 
   async function copy(keyId: number) {
     if (!selectedId) return
-    setError(''); setMessage('')
+    setError(''); setMessage(''); setManualKey('')
     try {
       const secret = await api<{ key: string }>(`/api/admin/users/${selectedId}/keys/${keyId}/secret`)
-      await navigator.clipboard.writeText(secret.key)
-      setMessage('密钥已复制到剪贴板')
+      try {
+        await copyText(secret.key)
+        setMessage('密钥已复制到剪贴板')
+      } catch {
+        setManualKey(secret.key)
+        setError('浏览器无法自动复制，请选中下方密钥手动复制。')
+      }
     } catch (e) { setError((e as Error).message) }
   }
 
@@ -124,7 +133,7 @@ export function UserManagement() {
   const availableGroups = groups.filter(group => group.enabled && (!group.is_private || group.member_ids.includes(selectedId ?? -1)))
   const visibleUsers = users
   return <div>
-    {error && <Notice text={error} error />}{message && <Notice text={message} />}
+    {error && <Notice text={error} error />}{message && <Notice text={message} />}{manualKey && <div className="secret-panel"><input aria-label="完整密钥" readOnly value={manualKey} onFocus={e => e.currentTarget.select()} /><button type="button" className="icon-button" title="关闭" onClick={() => setManualKey('')}><X size={17} /></button></div>}
     <div className="admin-toolbar"><div><h2>用户列表</h2><span>本页 {visibleUsers.length} 人</span></div><div className="admin-toolbar-actions"><label className="admin-search"><Search size={15} /><input aria-label="搜索用户" placeholder="搜索姓名或邮箱" value={search} onChange={e => { setSearch(e.target.value); setPage(0) }} /></label><label className="check-label"><input type="checkbox" checked={showDeleted} onChange={e => { setShowDeleted(e.target.checked); setPage(0) }} />显示已删除</label><button type="button" className="button secondary" onClick={() => { setPanel('credit'); setEditing(null) }}>账户入账</button><button type="button" className="button primary" onClick={() => { setPanel('create'); setEditing(null) }}><Plus size={16} />创建用户</button></div></div>
     {panel === 'create' && <section id="admin-editor" className="admin-edit-section"><div className="admin-edit-heading"><h3>创建普通用户</h3><button type="button" className="icon-button" title="关闭" onClick={() => setPanel(null)}><X size={17} /></button></div><form className="form-grid" onSubmit={create}>
       <label>名称<input required maxLength={80} value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} /></label>

@@ -2,13 +2,14 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight, BookOpen, Check, Copy, KeyRound, Store, WandSparkles } from 'lucide-react'
 import { PageHeader } from '../components/UI'
+import { copyText } from '../lib/clipboard'
 import { usePreferences } from '../lib/preferences'
 
 export function QuickstartPage() {
   const { t } = usePreferences()
   const [copied, setCopied] = useState(false)
   async function copy() {
-    try { await navigator.clipboard.writeText(window.location.origin); setCopied(true); window.setTimeout(() => setCopied(false), 1800) } catch { setCopied(false) }
+    try { await copyText(window.location.origin); setCopied(true); window.setTimeout(() => setCopied(false), 1800) } catch { setCopied(false) }
   }
   const steps = [
     { number: '01', icon: KeyRound, title: t('setupStep1'), body: t('setupStep1Body'), to: '/keys', action: t('openKeys') },

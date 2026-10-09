@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { ChevronLeft, ChevronRight, Copy, Download, Plus, Trash2 } from 'lucide-react'
 import { api, downloadCsv, formatDate, formatMoney, post } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import { Empty, Notice } from './UI'
 
 type CodeRow = { id: number; prefix: string; can_copy: boolean; amount: string; created_at: string; redeemed_by: number | null; redeemed_at: string | null }
@@ -35,13 +36,13 @@ export function RedemptionManagement() {
     catch (e) { setError((e as Error).message) }
   }
   async function copyCodes() {
-    try { await navigator.clipboard.writeText(newCodes.join('\n')); setMessage('兑换码已复制') }
+    try { await copyText(newCodes.join('\n')); setMessage('兑换码已复制') }
     catch (e) { setError((e as Error).message) }
   }
   async function copyCode(id: number) {
     try {
       const result = await api<{ code: string }>(`/api/admin/redemption-codes/${id}/secret`)
-      await navigator.clipboard.writeText(result.code)
+      await copyText(result.code)
       setMessage('兑换码已复制')
     } catch (e) { setError((e as Error).message) }
   }
