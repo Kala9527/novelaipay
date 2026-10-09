@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { WandSparkles, Plus, Trash2, Download, Image as ImageIcon, Sparkles, Expand, X } from 'lucide-react'
 import { api, formatDate, formatMoney } from '../lib/api'
 import { deleteImage, recentImages, saveImage, type CachedImage } from '../lib/imageHistory'
+import { newIdempotencyKey } from '../lib/idempotency'
 import type { Job, Key, Model } from '../types'
 import { Notice, Status } from '../components/UI'
 
@@ -85,7 +86,7 @@ export function JobsPage({ userId }: { userId: number }) {
       const key = keyId ? (await api<{ key: string }>(`/api/keys/${keyId}/secret`)).key : form.key
       const response = await fetch('/v1/images/generations', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`,
-          'Idempotency-Key': crypto.randomUUID() },
+          'Idempotency-Key': newIdempotencyKey() },
         body: JSON.stringify({ model: form.model, prompt: form.prompt, size: form.size,
           parameters: { steps: Number(form.steps), scale: Number(form.scale), sampler: form.sampler,
             negative_prompt: form.negative_prompt, seed: form.seed ? Number(form.seed) : null,
